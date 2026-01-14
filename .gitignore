@@ -1,0 +1,44 @@
+# === Java / Maven / Gradle ===
+target/
+build/
+out/
+*.class
+*.jar
+*.war
+*.ear
+
+# === Logs & Reports ===
+*.log
+*.csv
+*.json
+*.html
+
+# === OS Files ===
+.DS_Store
+Thumbs.db
+
+# === IDE Files ===
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse
+.project
+.classpath
+.settings/
+
+# VS Code
+.vscode/
+
+# === Packaging / jpackage output ===
+*.exe
+*.msi
+*.app
+*.dmg
+
+# === Temporary files ===
+*.tmp
+*.swp
+*.bak

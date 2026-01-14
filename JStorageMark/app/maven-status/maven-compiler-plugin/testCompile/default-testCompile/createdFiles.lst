@@ -1,0 +1,3 @@
+com\kira\jstoragemark\cli\MainIntegrationTest.class
+com\kira\jstoragemark\core\BenchmarkRunnerTest.class
+com\kira\jstoragemark\config\BenchmarkConfigTest.class
