@@ -3,26 +3,29 @@ target/
 build/
 out/
 *.class
-*.jar
-*.war
-*.ear
 
-# === Logs & Reports ===
+# === JAR / EXE / MSI артефакти від jpackage ===
+*.jar
+*.exe
+*.msi
+*.app
+*.dmg
+
+# === Тимчасові файли та логи ===
 *.log
+*.tmp
+*.swp
+*.bak
+
+# === Звіти бенчмарків ===
 *.csv
 *.json
 *.html
 
-# === OS Files ===
-.DS_Store
-Thumbs.db
-
-# === IDE Files ===
+# === IDE файли ===
 # IntelliJ IDEA
 .idea/
 *.iml
-*.ipr
-*.iws
 
 # Eclipse
 .project
@@ -32,13 +35,11 @@ Thumbs.db
 # VS Code
 .vscode/
 
-# === Packaging / jpackage output ===
-*.exe
-*.msi
-*.app
-*.dmg
+# === ОС системні файли ===
+.DS_Store
+Thumbs.db
 
-# === Temporary files ===
-*.tmp
-*.swp
-*.bak
+# === JStorageMark runtime та app (згенеровані jpackage) ===
+JStorageMark/app/
+JStorageMark/runtime/
+JStorageMark/jstoragemark-tests/
