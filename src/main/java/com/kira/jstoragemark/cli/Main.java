@@ -8,9 +8,14 @@ import com.kira.jstoragemark.result.BenchmarkResult;
 import com.kira.jstoragemark.metrics.MetricsSnapshot;
 
 import org.apache.commons.cli.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Command-line entry point for JStorageMark.
@@ -20,6 +25,7 @@ import java.util.List;
  *   java -jar jstoragemark.jar -d /tmp/testdir -t SEQ_WRITE -s 2147483648 -b 65536 -n 4 -i 3
  */
 public final class Main {
+    private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) {
         Options options = new Options();
@@ -41,22 +47,39 @@ public final class Main {
         try {
             CommandLine cmd = parser.parse(options, args);
 
-            Path dir = Path.of(cmd.getOptionValue("d", "./jstoragemark-tests"));
+            // Validate and get directory
+            String dirPath = cmd.getOptionValue("d", "./jstoragemark-tests");
+            Path dir = Path.of(dirPath);
+            if (!Files.exists(dir)) {
+                System.err.println("Error: Test directory does not exist: " + dirPath);
+                System.exit(1);
+            }
+            if (!Files.isDirectory(dir)) {
+                System.err.println("Error: Path is not a directory: " + dirPath);
+                System.exit(1);
+            }
 
             BenchmarkConfig.Builder builder = new BenchmarkConfig.Builder()
                     .testDirectory(dir)
-                    .fileSizeBytes(Long.parseLong(cmd.getOptionValue("s", String.valueOf(5L * 1024 * 1024 * 1024))))
-                    .blockSizeBytes(Integer.parseInt(cmd.getOptionValue("b", String.valueOf(128 * 1024))))
-                    .threads(Integer.parseInt(cmd.getOptionValue("n", "4")))
-                    .iterations(Integer.parseInt(cmd.getOptionValue("i", "5")))
-                    .queueDepth(Integer.parseInt(cmd.getOptionValue("q", "8")))
-                    .verbosity(Integer.parseInt(cmd.getOptionValue("v", "1")))
+                    .fileSizeBytes(parseFileSize(cmd.getOptionValue("s", String.valueOf(5L * 1024 * 1024 * 1024))))
+                    .blockSizeBytes(parseInt("block size", cmd.getOptionValue("b", String.valueOf(128 * 1024)), 
+                            512, 16 * 1024 * 1024))
+                    .threads(parseInt("threads", cmd.getOptionValue("n", "4"), 1, 128))
+                    .iterations(parseInt("iterations", cmd.getOptionValue("i", "5"), 1, 100))
+                    .queueDepth(parseInt("queue depth", cmd.getOptionValue("q", "8"), 1, 1024))
+                    .verbosity(parseInt("verbosity", cmd.getOptionValue("v", "1"), 0, 2))
                     .retainTestFiles(cmd.hasOption("r"));
 
             // Parse test types
             String[] testTypes = cmd.getOptionValue("t", "SEQ_READ,SEQ_WRITE").split(",");
             for (String tt : testTypes) {
-                builder.addTestType(BenchmarkConfig.TestType.valueOf(tt.trim().toUpperCase()));
+                tt = tt.trim().toUpperCase(Locale.ROOT);
+                try {
+                    builder.addTestType(BenchmarkConfig.TestType.valueOf(tt));
+                } catch (IllegalArgumentException e) {
+                    System.err.println("Error: Unknown test type: " + tt);
+                    System.exit(1);
+                }
             }
 
             // Add report formats
@@ -70,10 +93,21 @@ public final class Main {
             BenchmarkConfig config = builder.build();
             BenchmarkPaths paths = new BenchmarkPaths(config.getTestDirectory(), config.getSessionId());
 
+            logger.info("Starting benchmark with configuration: {}", config);
+            System.out.println("Starting JStorageMark benchmark...");
+            System.out.println("Test directory: " + config.getTestDirectory());
+            System.out.println("Test types: " + config.getTestTypes());
+            System.out.println("File size: " + formatBytes(config.getFileSizeBytes()));
+            System.out.println("Threads: " + config.getThreads());
+            System.out.println("Iterations: " + config.getIterations());
+            System.out.println();
+
             BenchmarkRunner runner = new BenchmarkRunner(config, paths);
             runner.startMetricsPolling();
 
+            long startTime = System.currentTimeMillis();
             List<BenchmarkResult> results = runner.runAll();
+            long duration = System.currentTimeMillis() - startTime;
             List<MetricsSnapshot> metrics = runner.getMetricsLog();
 
             ReportGenerator generator = new ReportGenerator(config, paths);
@@ -81,12 +115,73 @@ public final class Main {
             generator.writeJson(results, metrics);
             generator.writeHtml(results, metrics);
 
-            System.out.println("Benchmark completed. Reports saved in: " + config.getTestDirectory());
+            System.out.println("\n=== Benchmark Results ===");
+            System.out.println("Total time: " + (duration / 1000.0) + " seconds");
+            System.out.println("Total runs: " + results.size());
+            if (!results.isEmpty()) {
+                double avgThroughput = results.stream()
+                        .mapToDouble(BenchmarkResult::getThroughputMBps)
+                        .average()
+                        .orElse(0);
+                double avgLatency = results.stream()
+                        .mapToDouble(BenchmarkResult::getAvgLatencyMs)
+                        .average()
+                        .orElse(0);
+                System.out.printf(Locale.ROOT, "Average throughput: %.2f MB/s%n", avgThroughput);
+                System.out.printf(Locale.ROOT, "Average latency: %.2f ms%n", avgLatency);
+            }
+            System.out.println("Reports saved in: " + config.getTestDirectory());
+            logger.info("Benchmark completed successfully in {} seconds", duration / 1000.0);
 
-        } catch (Exception e) {
-            System.err.println("Error: " + e.getMessage());
+        } catch (ParseException e) {
+            System.err.println("Error parsing command line arguments: " + e.getMessage());
             formatter.printHelp("JStorageMark", options);
             System.exit(1);
+        } catch (NumberFormatException e) {
+            System.err.println("Error: Invalid number format - " + e.getMessage());
+            System.exit(1);
+        } catch (IllegalArgumentException e) {
+            System.err.println("Error: Configuration error - " + e.getMessage());
+            System.exit(1);
+        } catch (IOException e) {
+            System.err.println("Error: IO error - " + e.getMessage());
+            logger.error("IO error during benchmark", e);
+            System.exit(1);
+        } catch (InterruptedException e) {
+            System.err.println("Error: Benchmark was interrupted");
+            logger.error("Benchmark interrupted", e);
+            Thread.currentThread().interrupt();
+            System.exit(1);
+        } catch (Exception e) {
+            System.err.println("Error: Unexpected error - " + e.getMessage());
+            logger.error("Unexpected error", e);
+            System.exit(1);
         }
+    }
+
+    private static long parseFileSize(String value) throws NumberFormatException {
+        long size = Long.parseLong(value);
+        if (size <= 0) {
+            throw new IllegalArgumentException("File size must be positive");
+        }
+        if (size < 1024 * 1024) {
+            throw new IllegalArgumentException("File size must be at least 1 MB");
+        }
+        return size;
+    }
+
+    private static int parseInt(String name, String value, int min, int max) throws NumberFormatException {
+        int intValue = Integer.parseInt(value);
+        if (intValue < min || intValue > max) {
+            throw new IllegalArgumentException(name + " must be between " + min + " and " + max);
+        }
+        return intValue;
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes <= 0) return "0";
+        final String[] units = new String[]{"B", "KB", "MB", "GB", "TB"};
+        int digitGroups = (int) (Math.log10(bytes) / Math.log10(1024));
+        return String.format(Locale.ROOT, "%.2f %s", bytes / Math.pow(1024, digitGroups), units[digitGroups]);
     }
 }

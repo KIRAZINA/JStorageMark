@@ -110,9 +110,12 @@ public final class BenchmarkPaths {
                 Files.walkFileTree(baseDir, new SimpleFileVisitor<>() {
                     @Override
                     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                        String name = file.getFileName().toString();
-                        if (name.contains(sessionId) || name.startsWith("run-")) {
-                            Files.deleteIfExists(file);
+                        Path fileName = file.getFileName();
+                        if (fileName != null) {
+                            String name = fileName.toString();
+                            if (name.contains(sessionId) || name.startsWith("run-")) {
+                                Files.deleteIfExists(file);
+                            }
                         }
                         return FileVisitResult.CONTINUE;
                     }
