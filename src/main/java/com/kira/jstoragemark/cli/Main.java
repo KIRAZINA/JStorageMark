@@ -1,21 +1,26 @@
 package com.kira.jstoragemark.cli;
 
-import com.kira.jstoragemark.config.BenchmarkConfig;
-import com.kira.jstoragemark.fs.BenchmarkPaths;
-import com.kira.jstoragemark.core.BenchmarkRunner;
-import com.kira.jstoragemark.report.ReportGenerator;
-import com.kira.jstoragemark.result.BenchmarkResult;
-import com.kira.jstoragemark.metrics.MetricsSnapshot;
-
-import org.apache.commons.cli.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.kira.jstoragemark.config.BenchmarkConfig;
+import com.kira.jstoragemark.core.BenchmarkRunner;
+import com.kira.jstoragemark.fs.BenchmarkPaths;
+import com.kira.jstoragemark.metrics.MetricsSnapshot;
+import com.kira.jstoragemark.report.ReportGenerator;
+import com.kira.jstoragemark.result.BenchmarkResult;
 
 /**
  * Command-line entry point for JStorageMark.
@@ -40,6 +45,11 @@ public final class Main {
         options.addOption("v", "verbosity", true, "Verbosity level: 0,1,2");
         options.addOption("r", "retain", false, "Retain test files after run");
         options.addOption("html", "htmlReport", false, "Generate HTML report");
+        options.addOption("fs", "force-sync", false, "Force fsync after writes (default: true)");
+        options.addOption("nfs", "no-force-sync", false, "Disable fsync after writes");
+        options.addOption("se", "sync-every", true, "Sync every N blocks (0 = only at end)");
+        options.addOption("np", "no-preallocate", false, "Disable file preallocation");
+        options.addOption("hb", "heap-buffer", false, "Use heap buffer instead of direct buffer");
 
         CommandLineParser parser = new DefaultParser();
         HelpFormatter formatter = new HelpFormatter();
@@ -68,7 +78,11 @@ public final class Main {
                     .iterations(parseInt("iterations", cmd.getOptionValue("i", "5"), 1, 100))
                     .queueDepth(parseInt("queue depth", cmd.getOptionValue("q", "8"), 1, 1024))
                     .verbosity(parseInt("verbosity", cmd.getOptionValue("v", "1"), 0, 2))
-                    .retainTestFiles(cmd.hasOption("r"));
+                    .retainTestFiles(cmd.hasOption("r"))
+                    .forceSync(!cmd.hasOption("nfs"))
+                    .syncEveryNBlocks(parseInt("sync every", cmd.getOptionValue("se", "0"), 0, 10000))
+                    .preallocateFiles(!cmd.hasOption("np"))
+                    .useDirectBuffer(!cmd.hasOption("hb"));
 
             // Parse test types
             String[] testTypes = cmd.getOptionValue("t", "SEQ_READ,SEQ_WRITE").split(",");

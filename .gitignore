@@ -88,3 +88,101 @@ coverage/
 application-local*.yml
 application-local*.yaml
 application-local*.properties
+
+# === JStorageMark specific ===
+# Benchmark test directories and files
+test-run-*/
+benchmark-*/
+jstoragemark-*/
+*.test
+*.benchmark
+*.jstoragemark
+
+# Benchmark reports and outputs
+report*.csv
+report*.json
+report*.html
+*.jsm-*
+
+# Test data files
+*.dat
+*.bin
+*.testfile
+*.benchmarkfile
+
+# Temporary benchmark directories
+temp-benchmark*/
+benchmark-temp*/
+jstoragemark-temp*/
+
+# Performance profiling
+*.prof
+*.hprof
+jfr-*.jfr
+
+# === Additional development files ===
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.backup
+*.bak.*
+*.old
+
+# Lock files
+*.lock
+*.lck
+
+# Cache directories
+.cache/
+.caches/
+node_modules/
+
+# Build artifacts not in target/
+dist/
+build/
+out/
+
+# Documentation build
+docs/_build/
+site/
+
+# IDE specific ignores
+.vscode/settings.json
+.vscode/launch.json
+.vscode/extensions.json
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/dictionaries
+.idea/shelf
+.idea/contentModel.xml
+.idea/dataSources.ids
+.idea/dataSources.local.xml
+.idea/sqlDataSources.xml
+.idea/dynamic.xml
+.idea/uiDesigner.xml
+.idea/gradle.xml
+.idea/libraries
+.idea/misc.xml
+.idea/modules.xml
+.idea/.name
+.idea/compiler.xml
+.idea/copyright/profiles_settings.xml
+.idea/encodings.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/scopes/scope_settings.xml
+.idea/vcs.xml
+.idea/jsLibraryMappings.xml
+.idea/datasources.xml
+.idea/dataSources.ids
+.idea/sqlDataSources.xml
+.idea/dynamic.xml
+.idea/uiDesigner.xml

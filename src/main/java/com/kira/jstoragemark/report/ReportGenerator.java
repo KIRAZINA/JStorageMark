@@ -1,17 +1,5 @@
 package com.kira.jstoragemark.report;
 
-import com.kira.jstoragemark.result.BenchmarkResult;
-import com.kira.jstoragemark.metrics.MetricsSnapshot;
-import com.kira.jstoragemark.config.BenchmarkConfig;
-import com.kira.jstoragemark.fs.BenchmarkPaths;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.opencsv.CSVWriter;
-import org.apache.commons.text.StringEscapeUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
@@ -19,6 +7,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+
+import org.apache.commons.text.StringEscapeUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.kira.jstoragemark.config.BenchmarkConfig;
+import com.kira.jstoragemark.fs.BenchmarkPaths;
+import com.kira.jstoragemark.metrics.MetricsSnapshot;
+import com.kira.jstoragemark.result.BenchmarkResult;
+import com.opencsv.CSVWriter;
 
 /**
  * Generates benchmark reports in CSV, JSON, and optionally HTML.
@@ -50,8 +50,8 @@ public final class ReportGenerator {
             
             // Header
             writer.writeNext(new String[]{
-                    "RunId", "TestType", "BytesProcessed", "ElapsedMs",
-                    "ThroughputMBps", "AvgLatencyMs", "IOPS", "Timestamp"
+                    "RunId", "TestType", "BytesProcessed", "ElapsedMs", "ElapsedNs",
+                    "ThroughputMBps", "AvgLatencyMs", "AvgLatencyNs", "IOPS", "Timestamp"
             });
 
             // Rows with Locale-independent formatting
@@ -61,8 +61,10 @@ public final class ReportGenerator {
                         r.getTestType(),
                         String.valueOf(r.getBytesProcessed()),
                         String.valueOf(r.getElapsed().toMillis()),
+                        String.valueOf(r.getElapsedNanos()),
                         String.format(Locale.ROOT, "%.2f", r.getThroughputMBps()),
                         String.format(Locale.ROOT, "%.2f", r.getAvgLatencyMs()),
+                        String.format(Locale.ROOT, "%.2f", r.getAvgLatencyNs()),
                         String.format(Locale.ROOT, "%.2f", r.getIops()),
                         r.getTimestamp().toString()
                 });
@@ -138,13 +140,16 @@ public final class ReportGenerator {
 
             writer.write("<h2>System Metrics</h2><table>\n");
             writer.write("<tr><th>Timestamp</th><th>CPU (%)</th><th>RAM (%)</th>" +
-                    "<th>Disk Utilization (%)</th></tr>\n");
+                    "<th>Disk Reads</th><th>Disk Writes</th><th>Disk Read MB</th><th>Disk Write MB</th></tr>\n");
             
             for (MetricsSnapshot m : metrics) {
                 writer.write("<tr><td>" + StringEscapeUtils.escapeHtml4(m.getTimestamp().toString()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.2f", m.getCpuUsagePercent()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.2f", m.getRamUsagePercent()) +
-                        "</td><td>" + String.format(Locale.ROOT, "%.2f", m.getDiskUtilizationPercent()) +
+                        "</td><td>" + StringEscapeUtils.escapeHtml4(String.valueOf(m.getDiskReads())) +
+                        "</td><td>" + StringEscapeUtils.escapeHtml4(String.valueOf(m.getDiskWrites())) +
+                        "</td><td>" + String.format(Locale.ROOT, "%.2f", m.getDiskReadBytes() / (1024.0 * 1024.0)) +
+                        "</td><td>" + String.format(Locale.ROOT, "%.2f", m.getDiskWriteBytes() / (1024.0 * 1024.0)) +
                         "</td></tr>\n");
             }
             writer.write("</table>\n");

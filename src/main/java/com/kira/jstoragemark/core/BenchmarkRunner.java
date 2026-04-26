@@ -18,20 +18,23 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * Coordinates execution of benchmark workloads.
+ * Coordinates execution of benchmark workloads with true multithreading.
  * Responsibilities:
  *  - Prepare test files in dedicated directory.
- *  - Launch threads according to config (sequential/random I/O).
- *  - Collect throughput, latency, IOPS metrics.
+ *  - Launch threads according to config (one thread per file for true concurrency).
+ *  - Collect throughput, latency, IOPS metrics with nanosecond precision.
  *  - Poll system metrics at fixed intervals (using OSHI).
  *  - Aggregate results into BenchmarkResult objects.
  *
  * Notes:
- *  - Uses ExecutorService for concurrency with proper shutdown.
- *  - Single Random instance per session for better quality and performance.
- *  - FileChannel.force(true) ensures data is flushed to disk.
+ *  - Uses ExecutorService for true concurrent I/O operations.
+ *  - ThreadLocalRandom for thread-safe random number generation.
+ *  - Configurable sync strategy via forceSync and syncEveryNBlocks.
+ *  - DirectByteBuffer support for improved performance.
+ *  - Fixed ByteBuffer handling and unbiased random positioning.
  *  - OSHI provides real system metrics without external dependencies.
  */
 public final class BenchmarkRunner {
@@ -41,10 +44,13 @@ public final class BenchmarkRunner {
     private final BenchmarkPaths paths;
     private final ScheduledExecutorService metricsPoller;
     private final ExecutorService ioExecutor;
-    private final Random random;  // Shared Random instance
+    private final Random random;  // Shared Random instance for reproducible seeds
 
-    private final List<MetricsSnapshot> metricsLog = new ArrayList<>();
-    private final List<BenchmarkResult> results = new ArrayList<>();
+    private final List<MetricsSnapshot> metricsLog = new CopyOnWriteArrayList<>();
+    private final List<BenchmarkResult> results = Collections.synchronizedList(new ArrayList<>());
+    
+    // Thread-local buffer pool to avoid contention
+    private final ThreadLocal<ByteBuffer> bufferPool;
 
     // OSHI components for real metrics
     private final SystemInfo systemInfo = new SystemInfo();
@@ -59,28 +65,40 @@ public final class BenchmarkRunner {
             return t;
         });
         this.ioExecutor = Executors.newFixedThreadPool(config.getThreads());
-        // Initialize single Random instance with optional seed
+        // Initialize single Random instance with optional seed for reproducibility
         this.random = config.getRandomSeed().isPresent()
                 ? new Random(config.getRandomSeed().get())
-                : new Random();
-        logger.info("BenchmarkRunner initialized with {} threads", config.getThreads());
+                : null; // Use ThreadLocalRandom instead
+                
+        // Thread-local buffer pool for performance
+        this.bufferPool = ThreadLocal.withInitial(() -> 
+            config.isUseDirectBuffer() 
+                ? ByteBuffer.allocateDirect(config.getBlockSizeBytes())
+                : ByteBuffer.allocate(config.getBlockSizeBytes()));
+        
+        logger.info("BenchmarkRunner initialized with {} threads, directBuffer={}", 
+                config.getThreads(), config.isUseDirectBuffer());
     }
 
     /**
-     * Executes all configured test types sequentially with proper cleanup.
+     * Executes all configured test types with true multithreaded I/O.
+     * Each iteration runs with multiple threads, each on its own file.
      */
     public List<BenchmarkResult> runAll() throws IOException, InterruptedException {
         try {
             paths.ensureTestDirectory();
-            paths.validateFreeSpace(config.getFileSizeBytes());
-            logger.info("Starting benchmark: testTypes={}, fileSize={}, iterations={}",
-                    config.getTestTypes(), config.getFileSizeBytes(), config.getIterations());
+            // Calculate total space needed: threads * fileSize per iteration
+            long totalSpaceNeeded = config.getFileSizeBytes() * config.getThreads();
+            paths.validateFreeSpace(totalSpaceNeeded);
+            
+            logger.info("Starting benchmark: testTypes={}, fileSize={}, iterations={}, threads={}",
+                    config.getTestTypes(), config.getFileSizeBytes(), config.getIterations(), config.getThreads());
 
             int runId = 1;
             for (BenchmarkConfig.TestType type : config.getTestTypes()) {
                 for (int i = 0; i < config.getIterations(); i++) {
-                    BenchmarkResult result = runSingle(runId++, type);
-                    results.add(result);
+                    List<BenchmarkResult> iterationResults = runMultiThreaded(runId++, type);
+                    results.addAll(iterationResults);
                 }
             }
             return Collections.unmodifiableList(results);
@@ -93,56 +111,149 @@ public final class BenchmarkRunner {
     }
 
     /**
-     * Executes a single benchmark run of the given type.
+     * Run a single iteration with multiple threads.
+     * Each thread gets its own file to avoid position contention.
      */
-    private BenchmarkResult runSingle(int runId, BenchmarkConfig.TestType type) throws IOException {
-        Path file = paths.testFilePath(runId, type.name().toLowerCase());
-        ByteBuffer buffer = ByteBuffer.allocate(config.getBlockSizeBytes());
+    private List<BenchmarkResult> runMultiThreaded(int runId, BenchmarkConfig.TestType type) 
+            throws InterruptedException {
+        
+        CountDownLatch latch = new CountDownLatch(config.getThreads());
+        List<Future<BenchmarkResult>> futures = new ArrayList<>();
+        
+        for (int threadId = 0; threadId < config.getThreads(); threadId++) {
+            final int tid = threadId;
+            Future<BenchmarkResult> future = ioExecutor.submit(() -> {
+                try {
+                    // Each thread works on its own file
+                    Path threadFile = paths.testFilePath(runId, type.name().toLowerCase() + "-t" + tid);
+                    return runSingleThread(threadFile, runId, type, tid);
+                } finally {
+                    latch.countDown();
+                }
+            });
+            futures.add(future);
+        }
+        
+        // Wait for all threads with timeout
+        if (!latch.await(config.getMaxPerTestTarget().toMinutes(), TimeUnit.MINUTES)) {
+            logger.error("Benchmark timeout - forcing shutdown");
+            ioExecutor.shutdownNow();
+            throw new InterruptedException("Benchmark exceeded time limit");
+        }
+        
+        // Collect results
+        List<BenchmarkResult> iterationResults = new ArrayList<>();
+        for (Future<BenchmarkResult> f : futures) {
+            try {
+                iterationResults.add(f.get());
+            } catch (ExecutionException e) {
+                throw new RuntimeException("Thread execution failed", e.getCause());
+            }
+        }
+        
+        return iterationResults;
+    }
 
+    /**
+     * Single thread execution on its assigned file.
+     * Fixed ByteBuffer handling and unbiased random positioning.
+     */
+    private BenchmarkResult runSingleThread(Path file, int runId, BenchmarkConfig.TestType type, int threadId) 
+            throws IOException {
+        
+        ByteBuffer buffer = bufferPool.get();
         Instant start = Instant.now();
         long totalOps = 0;
         long bytesProcessed = 0;
         long fileSize = config.getFileSizeBytes();
+        
+        // Use ThreadLocalRandom for thread safety
+        ThreadLocalRandom tlr = ThreadLocalRandom.current();
+        // Use seeded Random if provided for reproducibility
+        Random rng = (random != null) ? random : new Random(tlr.nextLong());
 
         try (FileChannel channel = FileChannel.open(file,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE)) {
+            
+            // Preallocate file for accurate sequential write performance
+            if (config.isPreallocateFiles() && 
+                (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE)) {
+                channel.truncate(fileSize);
+            }
 
             while (bytesProcessed < fileSize) {
-                buffer.clear();
+                // Determine actual bytes to process (last block may be smaller)
+                int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
+                
+                buffer.clear();  // Reset: position=0, limit=capacity
+                buffer.limit(bytesToProcess);  // Adjust for last block
 
                 if (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE) {
-                    random.nextBytes(buffer.array());
-                    buffer.flip();
-                    channel.write(buffer);
+                    // FIXED: Proper buffer handling for write operations
+                    byte[] temp = new byte[bytesToProcess];
+                    rng.nextBytes(temp);
+                    buffer.put(temp);
+                    buffer.flip();  // Prepare for write: limit=position, position=0
+                    int written = channel.write(buffer);
+                    bytesProcessed += written;
+                    
                 } else {
-                    channel.read(buffer);
+                    // Read path
+                    int read = channel.read(buffer);
+                    if (read == -1) {
+                        break; // EOF
+                    }
+                    bytesProcessed += read;
                 }
 
+                // FIXED: Unbiased random positioning for random I/O
                 if (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE) {
-                    // Safe absolute value computation using nextLong masked to positive
-                    long pos = (random.nextLong() & Long.MAX_VALUE) % fileSize;
+                    // Ensure we don't seek past EOF during write
+                    long maxPos = Math.max(0, fileSize - bytesToProcess);
+                    long pos = tlr.nextLong(0, maxPos + 1);  // Java 17+ unbiased method
                     channel.position(pos);
                 }
 
-                bytesProcessed += config.getBlockSizeBytes();
                 totalOps++;
+                
+                // Configurable sync strategy
+                if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 && 
+                    totalOps % config.getSyncEveryNBlocks() == 0) {
+                    channel.force(false); // Sync metadata only
+                }
             }
 
-            channel.force(true); // flush to disk
+            // Final sync if configured
+            if (config.isForceSync() && config.getSyncEveryNBlocks() == 0) {
+                channel.force(true); // Sync data and metadata at end
+            }
         }
 
         Instant end = Instant.now();
+        return calculateResult(runId * 1000 + threadId, type, fileSize, start, end, totalOps);
+    }
+    
+    /**
+     * Calculate benchmark result with nanosecond precision.
+     */
+    private BenchmarkResult calculateResult(int runId, BenchmarkConfig.TestType type,
+            long bytesProcessed, Instant start, Instant end, long totalOps) {
+        
         Duration elapsed = Duration.between(start, end);
-
-        double elapsedSeconds = elapsed.toMillis() / 1000.0;
-        double throughputMBps = (fileSize / (1024.0 * 1024.0)) / elapsedSeconds;
-        double avgLatencyMs = (double) elapsed.toMillis() / totalOps;
+        long elapsedNanos = elapsed.toNanos();  // High precision
+        double elapsedSeconds = elapsedNanos / 1_000_000_000.0;
+        
+        // High precision calculations
+        double throughputMBps = (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds;
+        double avgLatencyMs = (elapsedNanos / 1_000_000.0) / totalOps;  // Convert to ms
+        double avgLatencyNs = (double) elapsedNanos / totalOps;  // Keep in nanoseconds
         double iops = totalOps / elapsedSeconds;
 
-        BenchmarkResult result = new BenchmarkResult(runId, type.name(), fileSize, elapsed,
-                throughputMBps, avgLatencyMs, iops, end);
+        BenchmarkResult result = new BenchmarkResult(runId, type.name(), bytesProcessed, elapsed,
+                throughputMBps, avgLatencyMs, iops, end, elapsedNanos, avgLatencyNs);
+        
         logger.debug("Run {} completed: type={}, throughput={:.2f} MB/s, latency={:.2f} ms",
                 runId, type, throughputMBps, avgLatencyMs);
         return result;
@@ -171,24 +282,32 @@ public final class BenchmarkRunner {
                     long availableMemory = hardware.getMemory().getAvailable();
                     double ramUsage = ((totalMemory - availableMemory) / (double) totalMemory) * 100;
                     
-                    // Get real disk utilization for test directory
-                    double diskUtilization = 0;
+                    // Get raw disk I/O counters (removed incorrect utilization %)
+                    long diskReads = 0;
+                    long diskWrites = 0;
+                    long diskReadBytes = 0;
+                    long diskWriteBytes = 0;
                     try {
                         java.util.List<oshi.hardware.HWDiskStore> diskStores = hardware.getDiskStores();
                         if (!diskStores.isEmpty()) {
-                            diskUtilization = (diskStores.get(0).getWrites() / 
-                                              (double) diskStores.get(0).getReads()) * 100;
-                            diskUtilization = Math.min(100, diskUtilization); // cap at 100%
+                            oshi.hardware.HWDiskStore disk = diskStores.get(0);
+                            diskReads = disk.getReads();
+                            diskWrites = disk.getWrites();
+                            diskReadBytes = disk.getReadBytes();
+                            diskWriteBytes = disk.getWriteBytes();
                         }
                     } catch (Exception e) {
-                        logger.debug("Could not retrieve disk utilization", e);
+                        logger.debug("Could not retrieve disk counters", e);
                     }
                     
                     MetricsSnapshot snapshot = new MetricsSnapshot(
                             now,
                             cpuLoad,
                             ramUsage,
-                            diskUtilization,
+                            diskReads,
+                            diskWrites,
+                            diskReadBytes,
+                            diskWriteBytes,
                             null // Temperature is platform-specific and may not be available
                     );
                     metricsLog.add(snapshot);

@@ -1,17 +1,5 @@
 package com.kira.jstoragemark.report;
 
-import com.kira.jstoragemark.config.BenchmarkConfig;
-import com.kira.jstoragemark.fs.BenchmarkPaths;
-import com.kira.jstoragemark.metrics.MetricsSnapshot;
-import com.kira.jstoragemark.result.BenchmarkResult;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,7 +9,20 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kira.jstoragemark.config.BenchmarkConfig;
+import com.kira.jstoragemark.fs.BenchmarkPaths;
+import com.kira.jstoragemark.metrics.MetricsSnapshot;
+import com.kira.jstoragemark.result.BenchmarkResult;
 
 /**
  * Tests for ReportGenerator output formats.
@@ -55,21 +56,25 @@ class ReportGeneratorTest {
     }
 
     private List<BenchmarkResult> createSampleResults() {
+        Instant now = Instant.now();
         return Arrays.asList(
                 new BenchmarkResult(1, "SEQ_READ", 1024L * 1024 * 1024,
-                        Duration.ofMillis(1000), 100.5, 10.2, 1000.0, Instant.now()),
+                        Duration.ofMillis(1000), 100.5, 10.2, 1000.0, now,
+                        Duration.ofMillis(1000).toNanos(), 10.2 * 1_000_000.0),
                 new BenchmarkResult(2, "SEQ_WRITE", 1024L * 1024 * 1024,
-                        Duration.ofMillis(2000), 50.25, 20.5, 500.0, Instant.now()),
+                        Duration.ofMillis(2000), 50.25, 20.5, 500.0, now,
+                        Duration.ofMillis(2000).toNanos(), 20.5 * 1_000_000.0),
                 new BenchmarkResult(3, "RAND_READ", 1024L * 1024 * 1024,
-                        Duration.ofMillis(1500), 75.0, 15.0, 750.0, Instant.now())
+                        Duration.ofMillis(1500), 75.0, 15.0, 750.0, now,
+                        Duration.ofMillis(1500).toNanos(), 15.0 * 1_000_000.0)
         );
     }
 
     private List<MetricsSnapshot> createSampleMetrics() {
         return Arrays.asList(
-                new MetricsSnapshot(Instant.now(), 45.5, 60.0, 30.0, 65.0),
-                new MetricsSnapshot(Instant.now().plusSeconds(1), 50.0, 62.5, 35.0, 67.0),
-                new MetricsSnapshot(Instant.now().plusSeconds(2), 48.0, 61.0, 32.0, 66.0)
+                new MetricsSnapshot(Instant.now(), 45.5, 60.0, 1000L, 500L, 1024L * 1024, 512L * 1024, 35.0),
+                new MetricsSnapshot(Instant.now().plusSeconds(1), 50.0, 62.5, 1100L, 550L, 2048L * 1024, 1024L * 1024, 36.5),
+                new MetricsSnapshot(Instant.now().plusSeconds(2), 48.0, 61.0, 1050L, 525L, 1536L * 1024, 768L * 1024, 35.8)
         );
     }
 
@@ -294,7 +299,8 @@ class ReportGeneratorTest {
         // Create result with special HTML characters
         BenchmarkResult specialResult = new BenchmarkResult(
                 1, "<script>alert('xss')</script>", 1024,
-                Duration.ofMillis(100), 100.0, 10.0, 1000.0, Instant.now()
+                Duration.ofMillis(100), 100.0, 10.0, 1000.0, Instant.now(),
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         );
 
         BenchmarkConfig htmlConfig = new BenchmarkConfig.Builder()

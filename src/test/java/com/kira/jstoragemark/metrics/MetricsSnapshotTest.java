@@ -1,13 +1,12 @@
 package com.kira.jstoragemark.metrics;
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-
 import java.time.Instant;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Tests for MetricsSnapshot data class.
@@ -25,14 +24,20 @@ class MetricsSnapshotTest {
                 TEST_TIMESTAMP,
                 45.5,
                 60.0,
-                30.0,
+                1000L,
+                500L,
+                1024L * 1024,
+                512L * 1024,
                 65.0
         );
 
         assertThat(snapshot.getTimestamp()).isEqualTo(TEST_TIMESTAMP);
         assertThat(snapshot.getCpuUsagePercent()).isEqualTo(45.5);
         assertThat(snapshot.getRamUsagePercent()).isEqualTo(60.0);
-        assertThat(snapshot.getDiskUtilizationPercent()).isEqualTo(30.0);
+        assertThat(snapshot.getDiskReads()).isEqualTo(1000L);
+        assertThat(snapshot.getDiskWrites()).isEqualTo(500L);
+        assertThat(snapshot.getDiskReadBytes()).isEqualTo(1024L * 1024);
+        assertThat(snapshot.getDiskWriteBytes()).isEqualTo(512L * 1024);
         assertThat(snapshot.getDiskTemperatureC()).isEqualTo(65.0);
     }
 
@@ -43,7 +48,10 @@ class MetricsSnapshotTest {
                 TEST_TIMESTAMP,
                 45.5,
                 60.0,
-                30.0,
+                1000L,
+                500L,
+                1024L * 1024,
+                512L * 1024,
                 null
         );
 
@@ -52,30 +60,31 @@ class MetricsSnapshotTest {
 
     @ParameterizedTest
     @CsvSource({
-            "0.0, 0.0, 0.0",
-            "100.0, 100.0, 100.0",
-            "50.0, 50.0, 50.0",
-            "25.5, 75.5, 33.3"
+            "0.0, 0.0",
+            "100.0, 100.0",
+            "50.0, 50.0",
+            "25.5, 75.5"
     })
     @DisplayName("Constructor should accept various percentage values")
-    void constructorShouldAcceptVariousPercentages(double cpu, double ram, double disk) {
+    void constructorShouldAcceptVariousPercentages(double cpu, double ram) {
         MetricsSnapshot snapshot = new MetricsSnapshot(
-                TEST_TIMESTAMP, cpu, ram, disk, null
+                TEST_TIMESTAMP, cpu, ram, 1000L, 500L, 1024L * 1024, 512L * 1024, null
         );
 
         assertThat(snapshot.getCpuUsagePercent()).isEqualTo(cpu);
         assertThat(snapshot.getRamUsagePercent()).isEqualTo(ram);
-        assertThat(snapshot.getDiskUtilizationPercent()).isEqualTo(disk);
+        assertThat(snapshot.getDiskReads()).isEqualTo(1000L);
+        assertThat(snapshot.getDiskWrites()).isEqualTo(500L);
     }
 
     @Test
     @DisplayName("Constructor should handle boundary values")
     void constructorShouldHandleBoundaryValues() {
         MetricsSnapshot minValues = new MetricsSnapshot(
-                TEST_TIMESTAMP, 0.0, 0.0, 0.0, -273.15
+                TEST_TIMESTAMP, 0.0, 0.0, 0L, 0L, 0L, 0L, -273.15
         );
         MetricsSnapshot maxValues = new MetricsSnapshot(
-                TEST_TIMESTAMP, 100.0, 100.0, 100.0, 1000.0
+                TEST_TIMESTAMP, 100.0, 100.0, Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE, 1000.0
         );
 
         assertThat(minValues.getCpuUsagePercent()).isZero();
@@ -91,13 +100,16 @@ class MetricsSnapshotTest {
                 TEST_TIMESTAMP,
                 Double.MAX_VALUE,
                 Double.MIN_VALUE,
-                Double.POSITIVE_INFINITY,
+                Long.MAX_VALUE,
+                Long.MAX_VALUE,
+                Long.MAX_VALUE,
+                Long.MAX_VALUE,
                 Double.NEGATIVE_INFINITY
         );
 
         assertThat(snapshot.getCpuUsagePercent()).isEqualTo(Double.MAX_VALUE);
         assertThat(snapshot.getRamUsagePercent()).isEqualTo(Double.MIN_VALUE);
-        assertThat(snapshot.getDiskUtilizationPercent()).isInfinite();
+        assertThat(snapshot.getDiskReads()).isEqualTo(Long.MAX_VALUE);
         assertThat(snapshot.getDiskTemperatureC()).isNegative();
     }
 
@@ -108,13 +120,15 @@ class MetricsSnapshotTest {
                 TEST_TIMESTAMP,
                 Double.NaN,
                 Double.NaN,
-                Double.NaN,
+                0L,
+                0L,
+                0L,
+                0L,
                 Double.NaN
         );
 
         assertThat(snapshot.getCpuUsagePercent()).isNaN();
         assertThat(snapshot.getRamUsagePercent()).isNaN();
-        assertThat(snapshot.getDiskUtilizationPercent()).isNaN();
         assertThat(snapshot.getDiskTemperatureC()).isNaN();
     }
 
@@ -131,7 +145,7 @@ class MetricsSnapshotTest {
 
         for (Instant ts : timestamps) {
             MetricsSnapshot snapshot = new MetricsSnapshot(
-                    ts, 50.0, 50.0, 50.0, null
+                    ts, 50.0, 50.0, 1000L, 500L, 1024L * 1024, 512L * 1024, null
             );
             assertThat(snapshot.getTimestamp()).isEqualTo(ts);
         }
@@ -142,7 +156,7 @@ class MetricsSnapshotTest {
     void shouldPreserveNanosecondPrecision() {
         Instant precise = Instant.parse("2024-01-15T10:30:00.123456789Z");
         MetricsSnapshot snapshot = new MetricsSnapshot(
-                precise, 50.0, 50.0, 50.0, null
+                precise, 50.0, 50.0, 1000L, 500L, 1024L * 1024, 512L * 1024, null
         );
 
         assertThat(snapshot.getTimestamp().getNano()).isEqualTo(123456789);
@@ -157,7 +171,10 @@ class MetricsSnapshotTest {
                 TEST_TIMESTAMP,
                 45.5,
                 60.0,
-                30.0,
+                1000L,
+                500L,
+                1024L * 1024,
+                512L * 1024,
                 65.0
         );
 
@@ -168,7 +185,8 @@ class MetricsSnapshotTest {
                 .contains("timestamp=" + TEST_TIMESTAMP)
                 .contains("cpuUsage=45.5")
                 .contains("ramUsage=60.0")
-                .contains("diskUtilization=30.0")
+                .contains("diskReads=1000")
+                .contains("diskWrites=500")
                 .contains("diskTemperatureC=65.0");
     }
 
@@ -179,7 +197,10 @@ class MetricsSnapshotTest {
                 TEST_TIMESTAMP,
                 45.5,
                 60.0,
-                30.0,
+                1000L,
+                500L,
+                1024L * 1024,
+                512L * 1024,
                 null
         );
 
@@ -198,14 +219,17 @@ class MetricsSnapshotTest {
                 customTimestamp,
                 75.5,
                 80.0,
-                45.5,
+                1000L,
+                500L,
+                1024L * 1024,
+                512L * 1024,
                 55.5
         );
 
         assertThat(snapshot.getTimestamp()).isEqualTo(customTimestamp);
         assertThat(snapshot.getCpuUsagePercent()).isEqualTo(75.5);
         assertThat(snapshot.getRamUsagePercent()).isEqualTo(80.0);
-        assertThat(snapshot.getDiskUtilizationPercent()).isEqualTo(45.5);
+        assertThat(snapshot.getDiskReads()).isEqualTo(1000L);
         assertThat(snapshot.getDiskTemperatureC()).isEqualTo(55.5);
     }
 
@@ -218,7 +242,10 @@ class MetricsSnapshotTest {
                 Instant.now(),
                 2.0,
                 30.0,
-                5.0,
+                100L,
+                50L,
+                1024L * 100,
+                512L * 100,
                 35.0
         );
 
@@ -233,7 +260,10 @@ class MetricsSnapshotTest {
                 Instant.now(),
                 95.0,
                 85.0,
-                80.0,
+                5000L,
+                2500L,
+                1024L * 1024 * 100,
+                512L * 1024 * 100,
                 75.0
         );
 
@@ -245,13 +275,13 @@ class MetricsSnapshotTest {
     @DisplayName("Should handle temperature variations")
     void shouldHandleTemperatureVariations() {
         MetricsSnapshot cold = new MetricsSnapshot(
-                Instant.now(), 50.0, 60.0, 30.0, 10.0
+                Instant.now(), 50.0, 60.0, 1000L, 500L, 1024L * 1024, 512L * 1024, 10.0
         );
         MetricsSnapshot normal = new MetricsSnapshot(
-                Instant.now(), 50.0, 60.0, 30.0, 50.0
+                Instant.now(), 50.0, 60.0, 1000L, 500L, 1024L * 1024, 512L * 1024, 50.0
         );
         MetricsSnapshot hot = new MetricsSnapshot(
-                Instant.now(), 50.0, 60.0, 30.0, 90.0
+                Instant.now(), 50.0, 60.0, 1000L, 500L, 1024L * 1024, 512L * 1024, 90.0
         );
 
         assertThat(cold.getDiskTemperatureC()).isEqualTo(10.0);

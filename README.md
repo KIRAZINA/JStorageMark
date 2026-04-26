@@ -1,15 +1,23 @@
 # JStorageMark
 
 ## Overview
-**JStorageMark** is a Java-based storage benchmarking tool designed to measure sequential and random read/write performance with enterprise-grade features. It provides both a **Swing GUI** and **command-line interface** for flexible usage, generates detailed reports in multiple formats (CSV, JSON, HTML), and collects real-time system metrics using OSHI.
+**JStorageMark** is a high-performance Java-based storage benchmarking tool designed for enterprise-grade disk I/O testing. It features a true multithreaded architecture with nanosecond precision timing, configurable sync strategies, and comprehensive system metrics collection. The tool provides both a modern Swing GUI and powerful command-line interface for flexible usage.
 
 ---
 
 ## Features
 
+### 🚀 Advanced Architecture
+- **True Multithreaded I/O** - Separate FileChannel instances per thread with proper synchronization
+- **Nanosecond Precision** - High-resolution timing for accurate latency measurements
+- **Configurable Sync Strategies** - Force sync options with configurable intervals
+- **Direct Buffer Support** - Optional direct ByteBuffer allocation for optimal performance
+- **File Preallocation** - Pre-allocate test files to reduce filesystem overhead
+- **Raw Disk I/O Counters** - Detailed disk read/write operations and byte counters
+
 ### Benchmark Types
 - 📊 **Sequential**: SEQ_READ, SEQ_WRITE
-- 🎲 **Random**: RAND_READ, RAND_WRITE
+- 🎲 **Random**: RAND_READ, RAND_WRITE with unbiased positioning
 - ✅ **Multiple test types** can run in a single session
 
 ### Configuration Parameters
@@ -17,41 +25,57 @@
 - **File size** - 1 GB to 10 GB per test file
 - **Block size** - 4 KB to 1 MB
 - **Threads** - 1 to 32 concurrent threads
-- **Iterations** - 3 to 10 runs per test type (for statistical averaging)
-- **Queue depth** - Simulated concurrency
+- **Iterations** - 1 to 10 runs per test type
+- **Warmup iterations** - 0 to 5 warmup runs
+- **Queue depth** - 1 to threads*2 for optimal performance
+- **Force sync** - Configurable disk synchronization
+- **Sync every N blocks** - Periodic sync intervals
+- **Direct buffer** - Use direct ByteBuffers for I/O
+- **Preallocate files** - Pre-allocate test files
 - **Random seed** - Optional seed for reproducible random tests
 
 ### User Interfaces
 1. **GUI Mode** (`com.kira.jstoragemark.gui.BenchmarkUI`)
-   - Checkboxes for multiple test type selection
-   - Real-time progress bar with iteration tracking
-   - Results table with averages
-   - Copy results to clipboard
-   - Input validation with error messages
+   - Modern responsive layout with GridBagLayout
+   - Multiple test type selection with proper checkbox styling
+   - Real-time progress tracking with iteration display
+   - Results table with automatic averaging
+   - Copy results to clipboard functionality
+   - Comprehensive input validation
 
 2. **CLI Mode** (`com.kira.jstoragemark.cli.Main`)
-   - Full automation support
+   - Full automation support with short option names
    - Scriptable from command line
    - Exit codes for CI/CD integration
+   - Configurable report formats
 
 ### Reports & Metrics
-- 📑 **Report formats**: CSV, JSON, HTML (with embedded charts option)
-- 🔧 **Real-time system metrics** (via OSHI):
+- 📑 **Report formats**: CSV, JSON, HTML
+- 🔧 **Enhanced system metrics** (via OSHI):
   - CPU usage (%)
   - RAM usage (%)
-  - Disk utilization (%)
+  - Raw disk reads/writes (operations)
+  - Raw disk read/write bytes
   - Disk temperature (when available)
 - 🔒 **HTML escaping** for XSS prevention
 - 🌍 **Locale-independent** number formatting (Locale.ROOT)
 - 📊 **UTF-8 encoding** for all reports
+- ⚡ **Nanosecond precision** timing data
 
 ### Technical Improvements
+- ✅ **True multithreaded I/O** - Separate FileChannel per thread
+- ✅ **Nanosecond precision** - High-resolution timing with elapsedNanos
+- ✅ **Proper buffer handling** - Fixed ByteBuffer.flip() usage
+- ✅ **Unbiased random positioning** - Improved random access algorithms
+- ✅ **Configurable sync strategies** - Force sync with intervals
+- ✅ **Direct buffer support** - Optional direct ByteBuffer allocation
+- ✅ **File preallocation** - Reduce filesystem overhead
 - ✅ **Swing threading** - All UI updates via `SwingUtilities.invokeLater()`
-- ✅ **Thread safety** - Single Random instance per session
-- ✅ **Proper resource cleanup** - `ExecutorService` with timeout and `awaitTermination()`
+- ✅ **Thread safety** - Proper synchronization and resource management
+- ✅ **Resource cleanup** - `ExecutorService` with timeout and `awaitTermination()`
 - ✅ **Comprehensive logging** - SLF4J with Logback
 - ✅ **Input validation** - All user inputs validated before processing
-- ✅ **Specific exceptions** - Proper exception handling (not generic catch-all)
+- ✅ **Specific exceptions** - Proper exception handling
 - ✅ **Finally block cleanup** - Guaranteed resource cleanup
 
 ---
@@ -112,7 +136,7 @@ java -cp target/jstoragemark-1.0-SNAPSHOT.jar com.kira.jstoragemark.cli.Main \
   -d ./benchmark-tests \
   -t SEQ_WRITE \
   -s 1073741824 \
-  -n 4 \
+  -n 1 \
   -i 3
 
 # Full example with all options
@@ -123,9 +147,13 @@ java -cp target/jstoragemark-1.0-SNAPSHOT.jar com.kira.jstoragemark.cli.Main \
   -b 65536 \
   -n 4 \
   -i 5 \
+  -w 1 \
   -q 8 \
+  -f \
+  -y 1000 \
+  -p \
+  -g \
   -v 2 \
-  -html \
   -r
 ```
 
@@ -138,10 +166,14 @@ java -cp target/jstoragemark-1.0-SNAPSHOT.jar com.kira.jstoragemark.cli.Main \
 | `-b` | `--block` | Block size in bytes | `131072` (128 KB) |
 | `-n` | `--threads` | Number of threads | `4` |
 | `-i` | `--iterations` | Number of iterations | `5` |
+| `-w` | `--warmup` | Warmup iterations | `1` |
 | `-q` | `--queue` | Queue depth | `8` |
+| `-f` | `--force-sync` | Force disk sync after writes | `true` |
+| `-y` | `--sync-every` | Sync every N blocks (0=disabled) | `0` |
+| `-p` | `--preallocate` | Preallocate test files | `true` |
+| `-g` | `--heap-buffer` | Use heap buffer (vs direct) | `false` |
 | `-v` | `--verbosity` | Verbosity (0-2) | `1` |
 | `-r` | `--retain` | Retain test files after run | `false` |
-| `-html` | `--htmlReport` | Generate HTML report | `false` |
 
 ---
 
@@ -205,8 +237,10 @@ RunId,TestType,BytesProcessed,ElapsedMs,ThroughputMBps,AvgLatencyMs,IOPS,Timesta
       "testType": "SEQ_WRITE",
       "bytesProcessed": 5368709120,
       "elapsedMs": 2345,
+      "elapsedNanos": 2345000000,
       "throughputMBps": 2183.50,
       "avgLatencyMs": 0.02,
+      "avgLatencyNs": 20000.0,
       "iops": 111634.33,
       "timestamp": "2024-01-15T10:30:00Z"
     }
@@ -216,7 +250,11 @@ RunId,TestType,BytesProcessed,ElapsedMs,ThroughputMBps,AvgLatencyMs,IOPS,Timesta
       "timestamp": "2024-01-15T10:30:00Z",
       "cpuUsagePercent": 45.5,
       "ramUsagePercent": 60.0,
-      "diskUtilizationPercent": 30.0
+      "diskReads": 1000,
+      "diskWrites": 500,
+      "diskReadBytes": 1048576,
+      "diskWriteBytes": 524288,
+      "diskTemperatureC": 65.0
     }
   ],
   "sessionId": "jsm-abc123def456"

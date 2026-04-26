@@ -1,7 +1,12 @@
 package com.kira.jstoragemark.fs;
 
 import java.io.IOException;
-import java.nio.file.*;
+import java.nio.file.FileStore;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.util.Objects;
@@ -69,6 +74,19 @@ public final class BenchmarkPaths {
     public Path testFilePath(int runId, String descriptor) {
         String safeDesc = descriptor == null ? "data" : descriptor.replaceAll("\\s+", ".");
         String fname = String.format("run-%03d.%s.%s.bin", runId, safeDesc, sessionId);
+        return baseDir.resolve(fname);
+    }
+
+    /**
+     * Returns a thread-specific test file path for multithreaded benchmarks.
+     * Each thread gets its own file to avoid position contention.
+     * Examples:
+     *  - jsm-abc123/run-001.seq_write-t0.bin
+     *  - jsm-abc123/run-001.seq_write-t1.bin
+     */
+    public Path testFilePath(int runId, String descriptor, int threadId) {
+        String safeDesc = descriptor == null ? "data" : descriptor.replaceAll("\\s+", ".");
+        String fname = String.format("run-%03d.%s-t%d.%s.bin", runId, safeDesc, threadId, sessionId);
         return baseDir.resolve(fname);
     }
 

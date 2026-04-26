@@ -2,7 +2,14 @@ package com.kira.jstoragemark.config;
 
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 
 /**
  * Immutable configuration for a single benchmark session.
@@ -59,12 +66,19 @@ public final class BenchmarkConfig {
 
     private final boolean allowRawDeviceAccess;    // If true, caller accepts permission risks
     private final boolean retainTestFiles;         // If true, keep generated files for inspection
+    private final boolean forceSync;               // If true, force fsync after writes
+    private final int syncEveryNBlocks;            // 0 = only at end, N = sync every N blocks
+    private final boolean preallocateFiles;        // If true, preallocate test files
 
     // ---- Monitoring / logging ----------------------------------------------
 
     private final int verbosity;                   // 0=min, 1=info, 2=debug (mapped by CLI)
     private final boolean collectSystemMetrics;    // CPU/RAM/utilization via OSHI (if available)
     private final Duration metricsPollInterval;    // Sampling cadence during runs
+
+    // ---- Performance options -----------------------------------------------
+
+    private final boolean useDirectBuffer;         // If true, use ByteBuffer.allocateDirect()
 
     // ---- Reporting ----------------------------------------------------------
 
@@ -94,6 +108,10 @@ public final class BenchmarkConfig {
 
         this.allowRawDeviceAccess = b.allowRawDeviceAccess;
         this.retainTestFiles = b.retainTestFiles;
+        this.forceSync = b.forceSync;
+        this.syncEveryNBlocks = b.syncEveryNBlocks;
+        this.preallocateFiles = b.preallocateFiles;
+        this.useDirectBuffer = b.useDirectBuffer;
 
         this.verbosity = b.verbosity;
         this.collectSystemMetrics = b.collectSystemMetrics;
@@ -193,6 +211,10 @@ public final class BenchmarkConfig {
     public Optional<Long> getRandomSeed() { return Optional.ofNullable(randomSeed); }
     public boolean isAllowRawDeviceAccess() { return allowRawDeviceAccess; }
     public boolean isRetainTestFiles() { return retainTestFiles; }
+    public boolean isForceSync() { return forceSync; }
+    public int getSyncEveryNBlocks() { return syncEveryNBlocks; }
+    public boolean isPreallocateFiles() { return preallocateFiles; }
+    public boolean isUseDirectBuffer() { return useDirectBuffer; }
     public int getVerbosity() { return verbosity; }
     public boolean isCollectSystemMetrics() { return collectSystemMetrics; }
     public Duration getMetricsPollInterval() { return metricsPollInterval; }
@@ -237,6 +259,10 @@ public final class BenchmarkConfig {
 
         private boolean allowRawDeviceAccess = false;
         private boolean retainTestFiles = false;
+        private boolean forceSync = true;            // Default: safe mode
+        private int syncEveryNBlocks = 0;            // Default: only at end
+        private boolean preallocateFiles = true;     // Default: preallocate for accurate results
+        private boolean useDirectBuffer = true;      // Default: direct buffer for performance
 
         private int verbosity = 1;
         private boolean collectSystemMetrics = true;
@@ -277,6 +303,10 @@ public final class BenchmarkConfig {
 
         public Builder allowRawDeviceAccess(boolean allow) { this.allowRawDeviceAccess = allow; return this; }
         public Builder retainTestFiles(boolean retain) { this.retainTestFiles = retain; return this; }
+        public Builder forceSync(boolean force) { this.forceSync = force; return this; }
+        public Builder syncEveryNBlocks(int n) { this.syncEveryNBlocks = n; return this; }
+        public Builder preallocateFiles(boolean preallocate) { this.preallocateFiles = preallocate; return this; }
+        public Builder useDirectBuffer(boolean useDirect) { this.useDirectBuffer = useDirect; return this; }
 
         public Builder verbosity(int level) { this.verbosity = level; return this; }
         public Builder collectSystemMetrics(boolean collect) { this.collectSystemMetrics = collect; return this; }
@@ -325,6 +355,10 @@ public final class BenchmarkConfig {
                 ", verbosity=" + verbosity +
                 ", collectSystemMetrics=" + collectSystemMetrics +
                 ", metricsPollInterval=" + metricsPollInterval +
+                ", forceSync=" + forceSync +
+                ", syncEveryNBlocks=" + syncEveryNBlocks +
+                ", preallocateFiles=" + preallocateFiles +
+                ", useDirectBuffer=" + useDirectBuffer +
                 ", reportFormats=" + reportFormats +
                 ", embedCharts=" + embedCharts +
                 ", maxPerTestTarget=" + maxPerTestTarget +

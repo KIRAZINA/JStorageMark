@@ -1,14 +1,15 @@
 package com.kira.jstoragemark.result;
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-
 import java.time.Duration;
 import java.time.Instant;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Tests for BenchmarkResult data class.
@@ -30,7 +31,9 @@ class BenchmarkResultTest {
                 100.5,
                 10.2,
                 1000.0,
-                TEST_TIMESTAMP
+                TEST_TIMESTAMP,
+                Duration.ofMillis(1000).toNanos(),
+                10.2 * 1_000_000.0
         );
 
         assertThat(result.getRunId()).isEqualTo(1);
@@ -50,8 +53,9 @@ class BenchmarkResultTest {
 
         for (String type : testTypes) {
             BenchmarkResult result = new BenchmarkResult(
-                    1, type, 1024, Duration.ofMillis(100),
-                    100.0, 10.0, 1000.0, TEST_TIMESTAMP
+                    1, type, 1024L, Duration.ofMillis(100),
+                    100.0, 10.0, 1000.0, TEST_TIMESTAMP,
+                    Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
             );
             assertThat(result.getTestType()).isEqualTo(type);
         }
@@ -61,8 +65,9 @@ class BenchmarkResultTest {
     @DisplayName("Constructor should handle zero values")
     void constructorShouldHandleZeroValues() {
         BenchmarkResult result = new BenchmarkResult(
-                0, "TEST", 0, Duration.ZERO,
-                0.0, 0.0, 0.0, TEST_TIMESTAMP
+                0, "TEST", 0L, Duration.ZERO,
+                0.0, 0.0, 0.0, TEST_TIMESTAMP,
+                Duration.ZERO.toNanos(), 0.0
         );
 
         assertThat(result.getRunId()).isZero();
@@ -76,8 +81,9 @@ class BenchmarkResultTest {
     void constructorShouldHandleNegativeValues() {
         // The class allows negative values (validation is elsewhere)
         BenchmarkResult result = new BenchmarkResult(
-                -1, "TEST", -100, Duration.ofMillis(-1000),
-                -50.0, -10.0, -500.0, TEST_TIMESTAMP
+                -1, "TEST", -100L, Duration.ofMillis(-1000),
+                -50.0, -10.0, -500.0, TEST_TIMESTAMP,
+                Duration.ofMillis(-1000).toNanos(), -10.0 * 1_000_000.0
         );
 
         assertThat(result.getRunId()).isNegative();
@@ -96,7 +102,9 @@ class BenchmarkResultTest {
                 Double.MAX_VALUE,
                 Double.MAX_VALUE,
                 Double.MAX_VALUE,
-                TEST_TIMESTAMP
+                TEST_TIMESTAMP,
+                Duration.ofMillis(Long.MAX_VALUE).toNanos(),
+                Double.MAX_VALUE * 1_000_000.0
         );
 
         assertThat(result.getRunId()).isEqualTo(Integer.MAX_VALUE);
@@ -109,8 +117,9 @@ class BenchmarkResultTest {
     @DisplayName("Constructor should throw on null test type")
     void constructorShouldThrowOnNullTestType() {
         assertThatThrownBy(() -> new BenchmarkResult(
-                1, null, 1024, Duration.ofMillis(100),
-                100.0, 10.0, 1000.0, TEST_TIMESTAMP
+                1, null, 1024L, Duration.ofMillis(100),
+                100.0, 10.0, 1000.0, TEST_TIMESTAMP,
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         )).isInstanceOf(NullPointerException.class);
     }
 
@@ -118,8 +127,9 @@ class BenchmarkResultTest {
     @DisplayName("Constructor should throw on null elapsed")
     void constructorShouldThrowOnNullElapsed() {
         assertThatThrownBy(() -> new BenchmarkResult(
-                1, "SEQ_READ", 1024, null,
-                100.0, 10.0, 1000.0, TEST_TIMESTAMP
+                1, "SEQ_READ", 1024L, null,
+                100.0, 10.0, 1000.0, TEST_TIMESTAMP,
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         )).isInstanceOf(NullPointerException.class);
     }
 
@@ -127,8 +137,9 @@ class BenchmarkResultTest {
     @DisplayName("Constructor should throw on null timestamp")
     void constructorShouldThrowOnNullTimestamp() {
         assertThatThrownBy(() -> new BenchmarkResult(
-                1, "SEQ_READ", 1024, Duration.ofMillis(100),
-                100.0, 10.0, 1000.0, null
+                1, "SEQ_READ", 1024L, Duration.ofMillis(100),
+                100.0, 10.0, 1000.0, null,
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         )).isInstanceOf(NullPointerException.class);
     }
 
@@ -140,7 +151,8 @@ class BenchmarkResultTest {
         Duration elapsed = Duration.ofSeconds(5);
         BenchmarkResult result = new BenchmarkResult(
                 42, "SEQ_WRITE", 2048L, elapsed,
-                200.0, 5.5, 2000.0, TEST_TIMESTAMP
+                200.0, 5.5, 2000.0, TEST_TIMESTAMP,
+                elapsed.toNanos(), 5.5 * 1_000_000.0
         );
 
         assertThat(result.getRunId()).isEqualTo(42);
@@ -159,8 +171,9 @@ class BenchmarkResultTest {
     @DisplayName("ToString should contain all field values")
     void toStringShouldContainAllFields() {
         BenchmarkResult result = new BenchmarkResult(
-                1, "SEQ_READ", 1024, Duration.ofMillis(100),
-                100.0, 10.0, 1000.0, TEST_TIMESTAMP
+                1, "SEQ_READ", 1024L, Duration.ofMillis(100),
+                100.0, 10.0, 1000.0, TEST_TIMESTAMP,
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         );
 
         String str = result.toString();
@@ -181,8 +194,9 @@ class BenchmarkResultTest {
     @DisplayName("ToString should handle special characters in test type")
     void toStringShouldHandleSpecialCharacters() {
         BenchmarkResult result = new BenchmarkResult(
-                1, "TEST_TYPE-123", 1024, Duration.ofMillis(100),
-                100.0, 10.0, 1000.0, TEST_TIMESTAMP
+                1, "TEST_TYPE-123", 1024L, Duration.ofMillis(100),
+                100.0, 10.0, 1000.0, TEST_TIMESTAMP,
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         );
 
         String str = result.toString();
@@ -207,7 +221,8 @@ class BenchmarkResultTest {
 
         BenchmarkResult result = new BenchmarkResult(
                 1, "TEST", bytes, elapsed,
-                actualThroughput, 10.0, 1000.0, TEST_TIMESTAMP
+                actualThroughput, 10.0, 1000.0, TEST_TIMESTAMP,
+                elapsed.toNanos(), 10.0 * 1_000_000.0
         );
 
         assertThat(result.getThroughputMBps()).isCloseTo(expectedThroughput, within(0.1));
@@ -225,8 +240,9 @@ class BenchmarkResultTest {
         double actualLatency = (double) elapsedMs / ops;
 
         BenchmarkResult result = new BenchmarkResult(
-                1, "TEST", 1024, elapsed,
-                100.0, actualLatency, ops, TEST_TIMESTAMP
+                1, "TEST", 1024L, elapsed,
+                100.0, actualLatency, ops, TEST_TIMESTAMP,
+                elapsed.toNanos(), actualLatency * 1_000_000.0
         );
 
         assertThat(result.getAvgLatencyMs()).isEqualTo(expectedLatency);
@@ -239,8 +255,9 @@ class BenchmarkResultTest {
     void shouldHandleVeryLongDurations() {
         Duration longDuration = Duration.ofHours(1);
         BenchmarkResult result = new BenchmarkResult(
-                1, "SEQ_READ", 1024, longDuration,
-                100.0, 10.0, 1000.0, TEST_TIMESTAMP
+                1, "SEQ_READ", 1024L, longDuration,
+                100.0, 10.0, 1000.0, TEST_TIMESTAMP,
+                longDuration.toNanos(), 10.0 * 1_000_000.0
         );
 
         assertThat(result.getElapsed()).isEqualTo(longDuration);
@@ -253,8 +270,9 @@ class BenchmarkResultTest {
         // Duration doesn't support fractions, but we can test nanos
         Duration preciseDuration = Duration.ofNanos(1500000); // 1.5ms
         BenchmarkResult result = new BenchmarkResult(
-                1, "SEQ_READ", 1024, preciseDuration,
-                100.0, 1.5, 1000.0, TEST_TIMESTAMP
+                1, "SEQ_READ", 1024L, preciseDuration,
+                100.0, 1.5, 1000.0, TEST_TIMESTAMP,
+                preciseDuration.toNanos(), 1.5 * 1_000_000.0
         );
 
         assertThat(result.getElapsed().toNanos()).isEqualTo(1500000);
@@ -264,8 +282,9 @@ class BenchmarkResultTest {
     @DisplayName("Should handle empty test type string")
     void shouldHandleEmptyTestType() {
         BenchmarkResult result = new BenchmarkResult(
-                1, "", 1024, Duration.ofMillis(100),
-                100.0, 10.0, 1000.0, TEST_TIMESTAMP
+                1, "", 1024L, Duration.ofMillis(100),
+                100.0, 10.0, 1000.0, TEST_TIMESTAMP,
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         );
 
         assertThat(result.getTestType()).isEmpty();
@@ -276,8 +295,9 @@ class BenchmarkResultTest {
     void shouldPreserveTimestampPrecision() {
         Instant preciseTimestamp = Instant.parse("2024-01-15T10:30:00.123456789Z");
         BenchmarkResult result = new BenchmarkResult(
-                1, "SEQ_READ", 1024, Duration.ofMillis(100),
-                100.0, 10.0, 1000.0, preciseTimestamp
+                1, "SEQ_READ", 1024L, Duration.ofMillis(100),
+                100.0, 10.0, 1000.0, preciseTimestamp,
+                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
         );
 
         assertThat(result.getTimestamp()).isEqualTo(preciseTimestamp);

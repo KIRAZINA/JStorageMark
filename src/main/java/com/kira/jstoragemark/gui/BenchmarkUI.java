@@ -1,26 +1,45 @@
 package com.kira.jstoragemark.gui;
 
-import com.kira.jstoragemark.config.BenchmarkConfig;
-import com.kira.jstoragemark.fs.BenchmarkPaths;
-import com.kira.jstoragemark.core.BenchmarkRunner;
-import com.kira.jstoragemark.report.ReportGenerator;
-import com.kira.jstoragemark.result.BenchmarkResult;
-import com.kira.jstoragemark.metrics.MetricsSnapshot;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.swing.*;
-import javax.swing.table.DefaultTableModel;
-import java.awt.*;
-import java.awt.datatransfer.StringSelection;
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.awt.FlowLayout;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
+import java.awt.GridLayout;
+import java.awt.Insets;
 import java.awt.Toolkit;
+import java.awt.datatransfer.StringSelection;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
 import java.util.List;
 import java.util.Locale;
 import java.util.Vector;
+
+import javax.swing.BorderFactory;
+import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JProgressBar;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
+import javax.swing.table.DefaultTableModel;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.kira.jstoragemark.config.BenchmarkConfig;
+import com.kira.jstoragemark.core.BenchmarkRunner;
+import com.kira.jstoragemark.fs.BenchmarkPaths;
+import com.kira.jstoragemark.metrics.MetricsSnapshot;
+import com.kira.jstoragemark.report.ReportGenerator;
+import com.kira.jstoragemark.result.BenchmarkResult;
 
 public class BenchmarkUI {
     private static final Logger logger = LoggerFactory.getLogger(BenchmarkUI.class);
@@ -32,27 +51,39 @@ public class BenchmarkUI {
     private static void createWindow() {
         JFrame frame = new JFrame("JStorageMark");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(950, 700);
+        frame.setSize(1200, 800);
+        frame.setMinimumSize(new Dimension(800, 600));
         frame.setLayout(new BorderLayout(10, 10));
 
-        // Settings panel
-        JPanel inputPanel = new JPanel(new GridLayout(0, 2, 10, 10));
+        // Settings panel with better layout for resizing
+        JPanel inputPanel = new JPanel(new GridBagLayout());
         inputPanel.setBorder(BorderFactory.createTitledBorder("Benchmark Configuration"));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(5, 5, 5, 5);
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
 
-        JTextField dirField = new JTextField("./jstoragemark-tests");
-        JTextField sizeField = new JTextField("5368709120"); // 5 GB
-        JTextField blockField = new JTextField("65536");      // 64 KB
-        JTextField threadsField = new JTextField("4");
-        JTextField iterationsField = new JTextField("5");
-        JTextField queueField = new JTextField("8");
+        JTextField dirField = new JTextField("./jstoragemark-tests", 20);
+        JTextField sizeField = new JTextField("5368709120", 15); // 5 GB
+        JTextField blockField = new JTextField("65536", 10);      // 64 KB
+        JTextField threadsField = new JTextField("4", 5);
+        JTextField iterationsField = new JTextField("5", 5);
+        JTextField queueField = new JTextField("8", 5);
 
-        // Multiple test type selection using checkboxes
+        // Multiple test type selection using checkboxes with normal appearance
         JCheckBox seqReadBox = new JCheckBox("SEQ_READ", true);
         JCheckBox seqWriteBox = new JCheckBox("SEQ_WRITE", true);
         JCheckBox randReadBox = new JCheckBox("RAND_READ");
         JCheckBox randWriteBox = new JCheckBox("RAND_WRITE");
-        
-        JPanel testTypePanel = new JPanel(new GridLayout(2, 2));
+
+        // Fix checkbox appearance
+        seqReadBox.setOpaque(false);
+        seqWriteBox.setOpaque(false);
+        randReadBox.setOpaque(false);
+        randWriteBox.setOpaque(false);
+
+        JPanel testTypePanel = new JPanel(new GridLayout(2, 2, 10, 10));
+        testTypePanel.setBorder(BorderFactory.createEmptyBorder());
         testTypePanel.add(seqReadBox);
         testTypePanel.add(seqWriteBox);
         testTypePanel.add(randReadBox);
@@ -60,33 +91,91 @@ public class BenchmarkUI {
 
         JCheckBox htmlReportBox = new JCheckBox("Generate HTML report");
 
+        // Advanced options with normal appearance
+        JCheckBox forceSyncBox = new JCheckBox("Force sync after writes", true);
+        JTextField syncEveryField = new JTextField("0", 10); // 0 = only at end
+        JCheckBox preallocateBox = new JCheckBox("Preallocate files", true);
+        JCheckBox directBufferBox = new JCheckBox("Use direct buffer", true);
+
+        // Fix checkbox appearance
+        forceSyncBox.setOpaque(false);
+        preallocateBox.setOpaque(false);
+        directBufferBox.setOpaque(false);
+
         JButton runButton = new JButton("Run Benchmark");
         JButton copyButton = new JButton("Copy Results");
         JButton clearButton = new JButton("Clear Results");
 
-        inputPanel.add(new JLabel("Test Directory:"));
-        inputPanel.add(dirField);
-        inputPanel.add(new JLabel("Test Types:"));
-        inputPanel.add(testTypePanel);
-        inputPanel.add(new JLabel("File Size (bytes):"));
-        inputPanel.add(sizeField);
-        inputPanel.add(new JLabel("Block Size (bytes):"));
-        inputPanel.add(blockField);
-        inputPanel.add(new JLabel("Threads:"));
-        inputPanel.add(threadsField);
-        inputPanel.add(new JLabel("Iterations:"));
-        inputPanel.add(iterationsField);
-        inputPanel.add(new JLabel("Queue Depth:"));
-        inputPanel.add(queueField);
-        inputPanel.add(new JLabel(""));
-        inputPanel.add(htmlReportBox);
-        
+        // Add components using GridBagLayout for better resizing
+        gbc.gridx = 0; gbc.gridy = 0;
+        inputPanel.add(new JLabel("Test Directory:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(dirField, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Test Types:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(testTypePanel, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 2; gbc.weightx = 0;
+        inputPanel.add(new JLabel("File Size (bytes):"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(sizeField, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 3; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Block Size (bytes):"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(blockField, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 4; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Threads:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(threadsField, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 5; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Iterations:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(iterationsField, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 6; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Queue Depth:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(queueField, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 7; gbc.weightx = 0;
+        inputPanel.add(new JLabel(""), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(htmlReportBox, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 8; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Force Sync:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(forceSyncBox, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 9; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Sync Every N Blocks:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(syncEveryField, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 10; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Preallocate Files:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(preallocateBox, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 11; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Buffer Type:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
+        inputPanel.add(directBufferBox, gbc);
+
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         buttonPanel.add(runButton);
         buttonPanel.add(copyButton);
         buttonPanel.add(clearButton);
-        inputPanel.add(new JLabel(""));
-        inputPanel.add(buttonPanel);
+
+        gbc.gridx = 0; gbc.gridy = 12; gbc.weightx = 0;
+        inputPanel.add(new JLabel(""), gbc);
+        gbc.gridx = 1; gbc.gridy = 12; gbc.weightx = 1.0;
+        inputPanel.add(buttonPanel, gbc);
 
         // Table for results
         String[] columnNames = {"RunId", "TestType", "Throughput (MB/s)", "Latency (ms)", "IOPS"};
@@ -124,6 +213,7 @@ public class BenchmarkUI {
                 int threads = validateThreads(threadsField.getText());
                 int iterations = validateIterations(iterationsField.getText());
                 int queueDepth = validateQueueDepth(queueField.getText());
+                int syncEvery = validateSyncEvery(syncEveryField.getText());
 
                 // Collect selected test types
                 java.util.Set<BenchmarkConfig.TestType> testTypes = new java.util.LinkedHashSet<>();
@@ -158,7 +248,11 @@ public class BenchmarkUI {
                                     .blockSizeBytes(blockSize)
                                     .threads(threads)
                                     .iterations(iterations)
-                                    .queueDepth(queueDepth);
+                                    .queueDepth(queueDepth)
+                                    .forceSync(forceSyncBox.isSelected())
+                                    .syncEveryNBlocks(syncEvery)
+                                    .preallocateFiles(preallocateBox.isSelected())
+                                    .useDirectBuffer(directBufferBox.isSelected());
 
                             if (htmlReportBox.isSelected()) {
                                 builder.addReportFormat(BenchmarkConfig.ReportFormat.HTML);
@@ -177,7 +271,6 @@ public class BenchmarkUI {
 
                             // Calculate total operations
                             int totalRuns = testTypes.size() * iterations;
-                            int completedRuns = 0;
 
                             SwingUtilities.invokeLater(() -> 
                                 progressLabel.setText(String.format("Running %d benchmark(s)...", totalRuns)));
@@ -359,6 +452,18 @@ public class BenchmarkUI {
             throw new IllegalArgumentException("Path is not a directory: " + pathStr);
         }
         return path;
+    }
+
+    private static int validateSyncEvery(String syncStr) throws IllegalArgumentException {
+        try {
+            int sync = Integer.parseInt(syncStr.trim());
+            if (sync < 0 || sync > 10000) {
+                throw new IllegalArgumentException("Sync every must be between 0 and 10000");
+            }
+            return sync;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid sync every value: " + syncStr);
+        }
     }
 
     private static long validateFileSize(String sizeStr) throws IllegalArgumentException {

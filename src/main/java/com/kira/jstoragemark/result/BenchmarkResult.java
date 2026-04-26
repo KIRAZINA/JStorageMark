@@ -19,8 +19,10 @@ public final class BenchmarkResult {
     private final String testType;          // SEQ_READ, RAND_WRITE, etc.
     private final long bytesProcessed;      // Total bytes read/written
     private final Duration elapsed;         // Total time taken
+    private final long elapsedNanos;        // High precision elapsed time in nanoseconds
     private final double throughputMBps;    // MB/s
-    private final double avgLatencyMs;      // Average latency per operation
+    private final double avgLatencyMs;      // Average latency per operation (milliseconds)
+    private final double avgLatencyNs;      // Average latency per operation (nanoseconds)
     private final double iops;              // I/O operations per second
     private final Instant timestamp;        // When run completed
 
@@ -31,13 +33,17 @@ public final class BenchmarkResult {
                            double throughputMBps,
                            double avgLatencyMs,
                            double iops,
-                           Instant timestamp) {
+                           Instant timestamp,
+                           long elapsedNanos,
+                           double avgLatencyNs) {
         this.runId = runId;
         this.testType = Objects.requireNonNull(testType);
         this.bytesProcessed = bytesProcessed;
         this.elapsed = Objects.requireNonNull(elapsed);
+        this.elapsedNanos = elapsedNanos;
         this.throughputMBps = throughputMBps;
         this.avgLatencyMs = avgLatencyMs;
+        this.avgLatencyNs = avgLatencyNs;
         this.iops = iops;
         this.timestamp = Objects.requireNonNull(timestamp);
     }
@@ -46,8 +52,10 @@ public final class BenchmarkResult {
     public String getTestType() { return testType; }
     public long getBytesProcessed() { return bytesProcessed; }
     public Duration getElapsed() { return elapsed; }
+    public long getElapsedNanos() { return elapsedNanos; }
     public double getThroughputMBps() { return throughputMBps; }
     public double getAvgLatencyMs() { return avgLatencyMs; }
+    public double getAvgLatencyNs() { return avgLatencyNs; }
     public double getIops() { return iops; }
     public Instant getTimestamp() { return timestamp; }
 
@@ -58,8 +66,10 @@ public final class BenchmarkResult {
                 ", testType='" + testType + '\'' +
                 ", bytesProcessed=" + bytesProcessed +
                 ", elapsed=" + elapsed.toMillis() + "ms" +
+                ", elapsedNanos=" + elapsedNanos + "ns" +
                 ", throughputMBps=" + throughputMBps +
                 ", avgLatencyMs=" + avgLatencyMs +
+                ", avgLatencyNs=" + avgLatencyNs +
                 ", iops=" + iops +
                 ", timestamp=" + timestamp +
                 '}';
