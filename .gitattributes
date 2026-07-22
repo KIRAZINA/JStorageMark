@@ -1,0 +1,12 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Java source code should always be LF
+*.java text eol=lf
+
+# Shell scripts must be LF
+*.sh text eol=lf
+
+# Windows batch files must be CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

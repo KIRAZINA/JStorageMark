@@ -17,8 +17,8 @@ class BenchmarkRunnerTest {
         BenchmarkConfig config = new BenchmarkConfig.Builder()
                 .testDirectory(Path.of("./testdir"))
                 .addTestType(BenchmarkConfig.TestType.SEQ_WRITE)
-                .fileSizeBytes(1024L * 1024 * 1024) // 1 GB
-                .blockSizeBytes(4 * 1024)           // 4 KB
+                .fileSizeBytes(1024L * 1024 * 1024)
+                .blockSizeBytes(4 * 1024)
                 .threads(1)
                 .queueDepth(1)
                 .iterations(3)
@@ -30,7 +30,7 @@ class BenchmarkRunnerTest {
         List<BenchmarkResult> results = runner.runAll();
 
         assertThat(results).isNotEmpty();
-        assertThat(results.get(0).getThroughputMBps()).isGreaterThan(0);
-        assertThat(results.get(0).getElapsed().toMillis()).isGreaterThan(0);
+        assertThat(results.get(0).throughputMBps()).isGreaterThan(0);
+        assertThat(results.get(0).elapsed().toMillis()).isGreaterThan(0);
     }
 }

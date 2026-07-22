@@ -17,9 +17,6 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
 
-/**
- * Unit tests for BenchmarkRunner with various configurations and edge cases.
- */
 class BenchmarkRunnerUnitTest {
 
     @TempDir
@@ -28,12 +25,14 @@ class BenchmarkRunnerUnitTest {
     private BenchmarkConfig config;
     private BenchmarkPaths paths;
 
+    private static final long ONE_GB = 1024L * 1024 * 1024;
+
     @BeforeEach
     void setUp() throws IOException {
         config = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
                 .addTestType(BenchmarkConfig.TestType.SEQ_WRITE)
-                .fileSizeBytes(64 * 1024 * 1024)
+                .fileSizeBytes(ONE_GB)
                 .blockSizeBytes(64 * 1024)
                 .threads(2)
                 .iterations(2)
@@ -70,11 +69,11 @@ class BenchmarkRunnerUnitTest {
         List<BenchmarkResult> results = runner.runAll();
 
         for (BenchmarkResult result : results) {
-            assertThat(result.getRunId()).isGreaterThan(0);
-            assertThat(result.getTestType()).isNotEmpty();
-            assertThat(result.getThroughputMBps()).isGreaterThan(0);
-            assertThat(result.getElapsed().toMillis()).isGreaterThan(0);
-            assertThat(result.getIops()).isGreaterThan(0);
+            assertThat(result.runId()).isNotNull().isNotEmpty();
+            assertThat(result.testType()).isNotEmpty();
+            assertThat(result.throughputMBps()).isGreaterThan(0);
+            assertThat(result.elapsed().toMillis()).isGreaterThan(0);
+            assertThat(result.iops()).isGreaterThan(0);
         }
     }
 
@@ -84,7 +83,7 @@ class BenchmarkRunnerUnitTest {
         BenchmarkConfig writeConfig = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
                 .addTestType(BenchmarkConfig.TestType.SEQ_WRITE)
-                .fileSizeBytes(32 * 1024 * 1024)
+                .fileSizeBytes(ONE_GB)
                 .blockSizeBytes(32 * 1024)
                 .threads(1)
                 .iterations(1)
@@ -95,7 +94,7 @@ class BenchmarkRunnerUnitTest {
         List<BenchmarkResult> results = runner.runAll();
 
         assertThat(results).hasSize(1);
-        assertThat(results.get(0).getTestType()).isEqualTo("SEQ_WRITE");
+        assertThat(results.get(0).testType()).isEqualTo("SEQ_WRITE");
     }
 
     @Test
@@ -104,7 +103,7 @@ class BenchmarkRunnerUnitTest {
         BenchmarkConfig randConfig = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
                 .addTestType(BenchmarkConfig.TestType.RAND_WRITE)
-                .fileSizeBytes(16 * 1024 * 1024)
+                .fileSizeBytes(ONE_GB)
                 .blockSizeBytes(16 * 1024)
                 .threads(1)
                 .iterations(1)
@@ -115,7 +114,7 @@ class BenchmarkRunnerUnitTest {
         List<BenchmarkResult> results = runner.runAll();
 
         assertThat(results).hasSize(1);
-        assertThat(results.get(0).getTestType()).isEqualTo("RAND_WRITE");
+        assertThat(results.get(0).testType()).isEqualTo("RAND_WRITE");
     }
 
     @Test
@@ -150,7 +149,7 @@ class BenchmarkRunnerUnitTest {
         BenchmarkConfig singleConfig = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
                 .addTestType(BenchmarkConfig.TestType.SEQ_WRITE)
-                .fileSizeBytes(16 * 1024 * 1024)
+                .fileSizeBytes(ONE_GB)
                 .threads(1)
                 .iterations(1)
                 .build();
@@ -168,7 +167,7 @@ class BenchmarkRunnerUnitTest {
         BenchmarkConfig seedConfig = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
                 .addTestType(BenchmarkConfig.TestType.RAND_WRITE)
-                .fileSizeBytes(16 * 1024 * 1024)
+                .fileSizeBytes(ONE_GB)
                 .threads(1)
                 .iterations(1)
                 .randomSeed(12345L)

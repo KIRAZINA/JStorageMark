@@ -54,7 +54,7 @@ class EndToEndTest {
                 "-q", "4"                                   // queue depth 4
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         // Verify reports exist
         File[] csvFiles = testDir.toFile().listFiles((d, n) -> n.endsWith(".csv"));
@@ -87,7 +87,7 @@ class EndToEndTest {
                 "-html"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         // Verify all report types exist
         File[] csvFiles = testDir.toFile().listFiles((d, n) -> n.endsWith(".csv"));
@@ -123,7 +123,7 @@ class EndToEndTest {
                 "-q", "8"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] files = testDir.toFile().listFiles((d, n) -> 
                 n.endsWith(".csv") || n.endsWith(".json"));
@@ -155,7 +155,7 @@ class EndToEndTest {
                 "-i", "2"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] csvFiles = testDir.toFile().listFiles((d, n) -> n.endsWith(".csv"));
         assertThat(csvFiles).hasSize(1);
@@ -177,7 +177,7 @@ class EndToEndTest {
                 "-r"  // Retain files
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         // Reports should exist
         File[] reports = testDir.toFile().listFiles((d, n) -> 
@@ -196,7 +196,7 @@ class EndToEndTest {
                 "-i", "2"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] jsonFiles = testDir.toFile().listFiles((d, n) -> n.endsWith(".json"));
         assertThat(jsonFiles).hasSize(1);
@@ -214,7 +214,7 @@ class EndToEndTest {
             assertThat(result.has("timestamp")).isTrue();
             
             // Validate data types
-            assertThat(result.get("runId").isInt()).isTrue();
+            assertThat(result.get("runId").isTextual()).isTrue();
             assertThat(result.get("throughputMBps").isDouble()).isTrue();
             assertThat(result.get("iops").isDouble()).isTrue();
         }
@@ -235,7 +235,7 @@ class EndToEndTest {
                 "-i", "2"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] csvFiles = testDir.toFile().listFiles((d, n) -> n.endsWith(".csv"));
         assertThat(csvFiles).hasSize(1);
@@ -267,7 +267,7 @@ class EndToEndTest {
                 "-html"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] htmlFiles = testDir.toFile().listFiles((d, n) -> n.endsWith(".html"));
         assertThat(htmlFiles).hasSize(1);
@@ -301,7 +301,7 @@ class EndToEndTest {
                 "-n", "1",
                 "-i", "1"
         };
-        Main.main(args1);
+        assertThat(Main.run(args1)).isEqualTo(0);
 
         // Second run
         String[] args2 = {
@@ -311,7 +311,7 @@ class EndToEndTest {
                 "-n", "1",
                 "-i", "1"
         };
-        Main.main(args2);
+        assertThat(Main.run(args2)).isEqualTo(0);
 
         // Should have 2 sets of reports (different session IDs)
         File[] csvFiles = testDir.toFile().listFiles((d, n) -> n.endsWith(".csv"));

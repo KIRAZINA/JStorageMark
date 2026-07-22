@@ -2,7 +2,7 @@
 <configuration>
     <!-- Define properties -->
     <property name="LOG_PATTERN" value="%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"/>
-    <property name="LOG_FILE" value="./jstoragemark-tests/jstoragemark.log"/>
+    <property name="LOG_FILE" value="${jstoragemark.dir:-./jstoragemark-tests}/jstoragemark.log"/>
 
     <!-- Console appender -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
@@ -20,7 +20,7 @@
             <charset>UTF-8</charset>
         </encoder>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>./jstoragemark-tests/jstoragemark-%d{yyyy-MM-dd}-%i.log.gz</fileNamePattern>
+            <fileNamePattern>${jstoragemark.dir:-./jstoragemark-tests}/jstoragemark-%d{yyyy-MM-dd}-%i.log.gz</fileNamePattern>
             <maxFileSize>10MB</maxFileSize>
             <maxHistory>10</maxHistory>
         </rollingPolicy>

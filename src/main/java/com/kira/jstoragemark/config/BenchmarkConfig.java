@@ -11,6 +11,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * Immutable configuration for a single benchmark session.
  * Covers workload customization, safety, logging verbosity, and reporting toggles.
@@ -22,6 +25,8 @@ import java.util.UUID;
  * - Supports multiple test types in one session to streamline reporting.
  */
 public final class BenchmarkConfig {
+
+    private static final Logger logger = LoggerFactory.getLogger(BenchmarkConfig.class);
 
     // ---- Enumerations -------------------------------------------------------
 
@@ -152,13 +157,12 @@ public final class BenchmarkConfig {
             throw new IllegalArgumentException("threads must be between 1 and 32.");
         }
 
-        // Iterations: 3–10
-        if (iterations < 1) {
-            throw new IllegalArgumentException("iterations must be >= 1.");
+        // Iterations: 1–100 (warn if < 3 for statistical stability)
+        if (iterations < 1 || iterations > 100) {
+            throw new IllegalArgumentException("iterations must be between 1 and 100.");
         }
-        if (iterations < 3 || iterations > 10) {
-            // Allow but warn—keep strict by default
-            throw new IllegalArgumentException("iterations should be between 3 and 10 for stable averaging.");
+        if (iterations < 3) {
+            logger.warn("iterations < 3 may produce unstable averages; consider at least 3.");
         }
 
         // Warmup: non-negative and reasonably small
@@ -326,6 +330,24 @@ public final class BenchmarkConfig {
         public Builder embedCharts(boolean embed) { this.embedCharts = embed; return this; }
         public Builder maxPerTestTarget(Duration d) { this.maxPerTestTarget = d; return this; }
         public Builder sessionId(String id) { this.sessionId = id; return this; }
+
+        @Override
+        public String toString() {
+            return "BenchmarkConfig.Builder{" +
+                    "testDirectory=" + testDirectory +
+                    ", testTypes=" + testTypes +
+                    ", fileSizeBytes=" + fileSizeBytes +
+                    ", blockSizeBytes=" + blockSizeBytes +
+                    ", threads=" + threads +
+                    ", iterations=" + iterations +
+                    ", warmupIterations=" + warmupIterations +
+                    ", ioMode=" + ioMode +
+                    ", queueDepth=" + queueDepth +
+                    ", randomSeed=" + randomSeed +
+                    ", retainTestFiles=" + retainTestFiles +
+                    ", forceSync=" + forceSync +
+                    '}';
+        }
 
         public BenchmarkConfig build() {
             // Ensure at least one test type chosen by default if user forgot.

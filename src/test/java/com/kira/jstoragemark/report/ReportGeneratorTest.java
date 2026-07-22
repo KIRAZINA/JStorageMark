@@ -32,6 +32,9 @@ class ReportGeneratorTest {
     @TempDir
     Path tempDir;
 
+    private static final SystemInfoSnapshot TEST_SYSTEM_INFO =
+            new SystemInfoSnapshot("test-os", "test-java", "test-cpu", 0L);
+
     private BenchmarkConfig config;
     private BenchmarkPaths paths;
     private ReportGenerator generator;
@@ -57,16 +60,16 @@ class ReportGeneratorTest {
 
     private List<BenchmarkResult> createSampleResults() {
         Instant now = Instant.now();
+        Duration d1 = Duration.ofMillis(1000);
+        Duration d2 = Duration.ofMillis(2000);
+        Duration d3 = Duration.ofMillis(1500);
         return Arrays.asList(
-                new BenchmarkResult(1, "SEQ_READ", 1024L * 1024 * 1024,
-                        Duration.ofMillis(1000), 100.5, 10.2, 1000.0, now,
-                        Duration.ofMillis(1000).toNanos(), 10.2 * 1_000_000.0),
-                new BenchmarkResult(2, "SEQ_WRITE", 1024L * 1024 * 1024,
-                        Duration.ofMillis(2000), 50.25, 20.5, 500.0, now,
-                        Duration.ofMillis(2000).toNanos(), 20.5 * 1_000_000.0),
-                new BenchmarkResult(3, "RAND_READ", 1024L * 1024 * 1024,
-                        Duration.ofMillis(1500), 75.0, 15.0, 750.0, now,
-                        Duration.ofMillis(1500).toNanos(), 15.0 * 1_000_000.0)
+                new BenchmarkResult("run-001-thread-00", "SEQ_READ", 1024L * 1024 * 1024,
+                        d1, d1.toNanos(), 100.5, 10.2, 10.2 * 1_000_000.0, 1000.0, now),
+                new BenchmarkResult("run-002-thread-00", "SEQ_WRITE", 1024L * 1024 * 1024,
+                        d2, d2.toNanos(), 50.25, 20.5, 20.5 * 1_000_000.0, 500.0, now),
+                new BenchmarkResult("run-003-thread-00", "RAND_READ", 1024L * 1024 * 1024,
+                        d3, d3.toNanos(), 75.0, 15.0, 15.0 * 1_000_000.0, 750.0, now)
         );
     }
 
@@ -159,7 +162,7 @@ class ReportGeneratorTest {
         List<BenchmarkResult> results = createSampleResults();
         List<MetricsSnapshot> metrics = createSampleMetrics();
 
-        generator.writeJson(results, metrics);
+        generator.writeJson(results, metrics, TEST_SYSTEM_INFO);
 
         Path jsonPath = paths.reportFilePath("json");
         assertThat(jsonPath).exists();
@@ -177,7 +180,7 @@ class ReportGeneratorTest {
     void writeJsonShouldIncludeAllResultFields() throws IOException {
         List<BenchmarkResult> results = createSampleResults();
 
-        generator.writeJson(results, Collections.emptyList());
+        generator.writeJson(results, Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path jsonPath = paths.reportFilePath("json");
         ObjectMapper mapper = new ObjectMapper();
@@ -196,7 +199,7 @@ class ReportGeneratorTest {
     void writeJsonShouldIncludeAllMetricFields() throws IOException {
         List<MetricsSnapshot> metrics = createSampleMetrics();
 
-        generator.writeJson(Collections.emptyList(), metrics);
+        generator.writeJson(Collections.emptyList(), metrics, TEST_SYSTEM_INFO);
 
         Path jsonPath = paths.reportFilePath("json");
         ObjectMapper mapper = new ObjectMapper();
@@ -206,7 +209,7 @@ class ReportGeneratorTest {
         assertThat(firstMetric.has("timestamp")).isTrue();
         assertThat(firstMetric.has("cpuUsagePercent")).isTrue();
         assertThat(firstMetric.has("ramUsagePercent")).isTrue();
-        assertThat(firstMetric.has("diskUtilizationPercent")).isTrue();
+        assertThat(firstMetric.has("diskReadBytes")).isTrue();
     }
 
     @Test
@@ -214,7 +217,7 @@ class ReportGeneratorTest {
     void writeJsonShouldBeIndented() throws IOException {
         List<BenchmarkResult> results = createSampleResults();
 
-        generator.writeJson(results, Collections.emptyList());
+        generator.writeJson(results, Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path jsonPath = paths.reportFilePath("json");
         String content = Files.readString(jsonPath);
@@ -226,7 +229,7 @@ class ReportGeneratorTest {
     @Test
     @DisplayName("Write JSON should handle empty lists")
     void writeJsonShouldHandleEmptyLists() throws IOException {
-        generator.writeJson(Collections.emptyList(), Collections.emptyList());
+        generator.writeJson(Collections.emptyList(), Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path jsonPath = paths.reportFilePath("json");
         ObjectMapper mapper = new ObjectMapper();
@@ -253,7 +256,7 @@ class ReportGeneratorTest {
         List<BenchmarkResult> results = createSampleResults();
         List<MetricsSnapshot> metrics = createSampleMetrics();
 
-        htmlGenerator.writeHtml(results, metrics);
+        htmlGenerator.writeHtml(results, metrics, TEST_SYSTEM_INFO);
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         assertThat(htmlPath).exists();
@@ -269,7 +272,7 @@ class ReportGeneratorTest {
     void writeHtmlShouldSkipWhenNotEnabled() throws IOException {
         List<BenchmarkResult> results = createSampleResults();
 
-        generator.writeHtml(results, Collections.emptyList());
+        generator.writeHtml(results, Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path htmlPath = paths.reportFilePath("html");
         assertThat(htmlPath).doesNotExist();
@@ -286,7 +289,7 @@ class ReportGeneratorTest {
         BenchmarkPaths htmlPaths = new BenchmarkPaths(tempDir, htmlConfig.getSessionId());
         ReportGenerator htmlGenerator = new ReportGenerator(htmlConfig, htmlPaths);
 
-        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList());
+        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         String content = Files.readString(htmlPath);
@@ -298,9 +301,8 @@ class ReportGeneratorTest {
     void writeHtmlShouldEscapeSpecialCharacters() throws IOException {
         // Create result with special HTML characters
         BenchmarkResult specialResult = new BenchmarkResult(
-                1, "<script>alert('xss')</script>", 1024,
-                Duration.ofMillis(100), 100.0, 10.0, 1000.0, Instant.now(),
-                Duration.ofMillis(100).toNanos(), 10.0 * 1_000_000.0
+                "run-001-thread-00", "<script>alert('xss')</script>", 1024L,
+                Duration.ofMillis(100), Duration.ofMillis(100).toNanos(), 100.0, 10.0, 10.0 * 1_000_000.0, 1000.0, Instant.now()
         );
 
         BenchmarkConfig htmlConfig = new BenchmarkConfig.Builder()
@@ -311,12 +313,12 @@ class ReportGeneratorTest {
         BenchmarkPaths htmlPaths = new BenchmarkPaths(tempDir, htmlConfig.getSessionId());
         ReportGenerator htmlGenerator = new ReportGenerator(htmlConfig, htmlPaths);
 
-        htmlGenerator.writeHtml(Collections.singletonList(specialResult), Collections.emptyList());
+        htmlGenerator.writeHtml(Collections.singletonList(specialResult), Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         String content = Files.readString(htmlPath);
         assertThat(content).doesNotContain("<script>");
-        assertThat(content).contains("<script>");
+        assertThat(content).contains("&lt;script&gt;");
     }
 
     @Test
@@ -330,7 +332,7 @@ class ReportGeneratorTest {
         BenchmarkPaths htmlPaths = new BenchmarkPaths(tempDir, htmlConfig.getSessionId());
         ReportGenerator htmlGenerator = new ReportGenerator(htmlConfig, htmlPaths);
 
-        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList());
+        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         String content = Files.readString(htmlPath);
@@ -353,7 +355,7 @@ class ReportGeneratorTest {
         BenchmarkPaths htmlPaths = new BenchmarkPaths(tempDir, htmlConfig.getSessionId());
         ReportGenerator htmlGenerator = new ReportGenerator(htmlConfig, htmlPaths);
 
-        htmlGenerator.writeHtml(createSampleResults(), createSampleMetrics());
+        htmlGenerator.writeHtml(createSampleResults(), createSampleMetrics(), TEST_SYSTEM_INFO);
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         String content = Files.readString(htmlPath);
@@ -374,7 +376,7 @@ class ReportGeneratorTest {
         BenchmarkPaths htmlPaths = new BenchmarkPaths(tempDir, htmlConfig.getSessionId());
         ReportGenerator htmlGenerator = new ReportGenerator(htmlConfig, htmlPaths);
 
-        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList());
+        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         String content = Files.readString(htmlPath);
@@ -397,7 +399,7 @@ class ReportGeneratorTest {
         BenchmarkPaths htmlPaths = new BenchmarkPaths(tempDir, htmlConfig.getSessionId());
         ReportGenerator htmlGenerator = new ReportGenerator(htmlConfig, htmlPaths);
 
-        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList());
+        htmlGenerator.writeHtml(createSampleResults(), Collections.emptyList(), TEST_SYSTEM_INFO);
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         assertThat(htmlPath).exists();

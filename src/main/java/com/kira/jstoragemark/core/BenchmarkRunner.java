@@ -2,15 +2,21 @@ package com.kira.jstoragemark.core;
 
 import com.kira.jstoragemark.config.BenchmarkConfig;
 import com.kira.jstoragemark.fs.BenchmarkPaths;
+import com.kira.jstoragemark.report.SystemInfoSnapshot;
 import com.kira.jstoragemark.result.BenchmarkResult;
 import com.kira.jstoragemark.metrics.MetricsSnapshot;
+import com.kira.jstoragemark.metrics.IMetricsCollector;
+import com.kira.jstoragemark.metrics.MetricsCollector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import oshi.SystemInfo;
+import oshi.hardware.CentralProcessor;
 import oshi.hardware.HardwareAbstractionLayer;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousFileChannel;
+import java.nio.channels.CompletionHandler;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -18,83 +24,104 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * Coordinates execution of benchmark workloads with true multithreading.
- * Responsibilities:
- *  - Prepare test files in dedicated directory.
- *  - Launch threads according to config (one thread per file for true concurrency).
- *  - Collect throughput, latency, IOPS metrics with nanosecond precision.
- *  - Poll system metrics at fixed intervals (using OSHI).
- *  - Aggregate results into BenchmarkResult objects.
- *
- * Notes:
- *  - Uses ExecutorService for true concurrent I/O operations.
- *  - ThreadLocalRandom for thread-safe random number generation.
- *  - Configurable sync strategy via forceSync and syncEveryNBlocks.
- *  - DirectByteBuffer support for improved performance.
- *  - Fixed ByteBuffer handling and unbiased random positioning.
- *  - OSHI provides real system metrics without external dependencies.
- */
-public final class BenchmarkRunner {
+public final class BenchmarkRunner implements IBenchmarkRunner {
     private static final Logger logger = LoggerFactory.getLogger(BenchmarkRunner.class);
 
     private final BenchmarkConfig config;
     private final BenchmarkPaths paths;
-    private final ScheduledExecutorService metricsPoller;
+    private final IMetricsCollector metricsCollector;
     private final ExecutorService ioExecutor;
-    private final Random random;  // Shared Random instance for reproducible seeds
 
-    private final List<MetricsSnapshot> metricsLog = new CopyOnWriteArrayList<>();
     private final List<BenchmarkResult> results = Collections.synchronizedList(new ArrayList<>());
-    
-    // Thread-local buffer pool to avoid contention
-    private final ThreadLocal<ByteBuffer> bufferPool;
 
-    // OSHI components for real metrics
-    private final SystemInfo systemInfo = new SystemInfo();
-    private final HardwareAbstractionLayer hardware = systemInfo.getHardware();
+    private final ThreadLocal<ByteBuffer> bufferPool;
+    private final Map<Integer, Random> threadRngMap;
+    private final long baseSeed;
+    private final boolean useFixedSeed;
+
+    private final Semaphore queueSemaphore;
+    private final SystemInfoSnapshot systemInfo;
 
     public BenchmarkRunner(BenchmarkConfig config, BenchmarkPaths paths) {
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.paths = Objects.requireNonNull(paths, "paths must not be null");
-        this.metricsPoller = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "BenchmarkMetricsPoller");
-            t.setDaemon(true);
-            return t;
-        });
+        this.metricsCollector = new MetricsCollector(config.getMetricsPollInterval());
         this.ioExecutor = Executors.newFixedThreadPool(config.getThreads());
-        // Initialize single Random instance with optional seed for reproducibility
-        this.random = config.getRandomSeed().isPresent()
-                ? new Random(config.getRandomSeed().get())
-                : null; // Use ThreadLocalRandom instead
-                
-        // Thread-local buffer pool for performance
-        this.bufferPool = ThreadLocal.withInitial(() -> 
-            config.isUseDirectBuffer() 
+
+        this.bufferPool = ThreadLocal.withInitial(() ->
+            config.isUseDirectBuffer()
                 ? ByteBuffer.allocateDirect(config.getBlockSizeBytes())
                 : ByteBuffer.allocate(config.getBlockSizeBytes()));
-        
-        logger.info("BenchmarkRunner initialized with {} threads, directBuffer={}", 
-                config.getThreads(), config.isUseDirectBuffer());
+
+        Optional<Long> seedOpt = config.getRandomSeed();
+        this.threadRngMap = new ConcurrentHashMap<>();
+        this.baseSeed = seedOpt.orElse(0L);
+        this.useFixedSeed = seedOpt.isPresent();
+
+        this.queueSemaphore = new Semaphore(config.getQueueDepth());
+        this.systemInfo = captureSystemInfo();
+
+        logger.info("BenchmarkRunner initialized with {} threads, directBuffer={}, ioMode={}, queueDepth={}",
+                config.getThreads(), config.isUseDirectBuffer(), config.getIoMode(), config.getQueueDepth());
     }
 
-    /**
-     * Executes all configured test types with true multithreaded I/O.
-     * Each iteration runs with multiple threads, each on its own file.
-     */
+    private static SystemInfoSnapshot captureSystemInfo() {
+        try {
+            SystemInfo si = new SystemInfo();
+            HardwareAbstractionLayer hal = si.getHardware();
+            CentralProcessor cpu = hal.getProcessor();
+            return new SystemInfoSnapshot(
+                System.getProperty("os.name") + " " + System.getProperty("os.version"),
+                System.getProperty("java.version"),
+                cpu.getProcessorIdentifier().getName(),
+                hal.getMemory().getTotal()
+            );
+        } catch (Exception e) {
+            logger.warn("Could not capture system info", e);
+            return new SystemInfoSnapshot("unknown", "unknown", "unknown", 0L);
+        }
+    }
+
+    public SystemInfoSnapshot getSystemInfo() {
+        return systemInfo;
+    }
+
+    private Random getThreadRng(int threadId) {
+        if (!useFixedSeed) {
+            return new Random(ThreadLocalRandom.current().nextLong());
+        }
+        return threadRngMap.computeIfAbsent(threadId,
+            tid -> new Random(baseSeed ^ (tid * 0x9E3779B97F4A7C15L)));
+    }
+
+    @Override
     public List<BenchmarkResult> runAll() throws IOException, InterruptedException {
         try {
             paths.ensureTestDirectory();
-            // Calculate total space needed: threads * fileSize per iteration
             long totalSpaceNeeded = config.getFileSizeBytes() * config.getThreads();
             paths.validateFreeSpace(totalSpaceNeeded);
-            
-            logger.info("Starting benchmark: testTypes={}, fileSize={}, iterations={}, threads={}",
-                    config.getTestTypes(), config.getFileSizeBytes(), config.getIterations(), config.getThreads());
+
+            logger.info("Starting benchmark: testTypes={}, fileSize={}, iterations={}, warmup={}, threads={}",
+                    config.getTestTypes(), config.getFileSizeBytes(), config.getIterations(),
+                    config.getWarmupIterations(), config.getThreads());
 
             int runId = 1;
+
+            int warmup = config.getWarmupIterations();
+            if (warmup > 0) {
+                logger.info("Starting {} warmup iteration(s)", warmup);
+                for (BenchmarkConfig.TestType type : config.getTestTypes()) {
+                    for (int i = 0; i < warmup; i++) {
+                        runMultiThreaded(-runId, type);
+                        runId++;
+                    }
+                }
+                results.clear();
+                logger.info("Warmup completed, starting measured runs");
+            }
+
+            runId = 1;
             for (BenchmarkConfig.TestType type : config.getTestTypes()) {
                 for (int i = 0; i < config.getIterations(); i++) {
                     List<BenchmarkResult> iterationResults = runMultiThreaded(runId++, type);
@@ -110,38 +137,36 @@ public final class BenchmarkRunner {
         }
     }
 
-    /**
-     * Run a single iteration with multiple threads.
-     * Each thread gets its own file to avoid position contention.
-     */
-    private List<BenchmarkResult> runMultiThreaded(int runId, BenchmarkConfig.TestType type) 
+    private List<BenchmarkResult> runMultiThreaded(int runId, BenchmarkConfig.TestType type)
             throws InterruptedException {
-        
+
         CountDownLatch latch = new CountDownLatch(config.getThreads());
         List<Future<BenchmarkResult>> futures = new ArrayList<>();
-        
+
         for (int threadId = 0; threadId < config.getThreads(); threadId++) {
             final int tid = threadId;
+            final int currentRunId = runId;
             Future<BenchmarkResult> future = ioExecutor.submit(() -> {
                 try {
-                    // Each thread works on its own file
-                    Path threadFile = paths.testFilePath(runId, type.name().toLowerCase() + "-t" + tid);
-                    return runSingleThread(threadFile, runId, type, tid);
+                    Path threadFile = paths.testFilePath(currentRunId, type.name().toLowerCase() + "-t" + tid);
+                    if (config.getIoMode() == BenchmarkConfig.IoMode.ASYNC) {
+                        return runSingleThreadAsync(threadFile, currentRunId, type, tid);
+                    } else {
+                        return runSingleThreadSync(threadFile, currentRunId, type, tid);
+                    }
                 } finally {
                     latch.countDown();
                 }
             });
             futures.add(future);
         }
-        
-        // Wait for all threads with timeout
+
         if (!latch.await(config.getMaxPerTestTarget().toMinutes(), TimeUnit.MINUTES)) {
             logger.error("Benchmark timeout - forcing shutdown");
             ioExecutor.shutdownNow();
             throw new InterruptedException("Benchmark exceeded time limit");
         }
-        
-        // Collect results
+
         List<BenchmarkResult> iterationResults = new ArrayList<>();
         for (Future<BenchmarkResult> f : futures) {
             try {
@@ -150,192 +175,213 @@ public final class BenchmarkRunner {
                 throw new RuntimeException("Thread execution failed", e.getCause());
             }
         }
-        
         return iterationResults;
     }
 
-    /**
-     * Single thread execution on its assigned file.
-     * Fixed ByteBuffer handling and unbiased random positioning.
-     */
-    private BenchmarkResult runSingleThread(Path file, int runId, BenchmarkConfig.TestType type, int threadId) 
+    private BenchmarkResult runSingleThreadSync(Path file, int runId, BenchmarkConfig.TestType type, int threadId)
             throws IOException {
-        
+
         ByteBuffer buffer = bufferPool.get();
+        Random rng = getThreadRng(threadId);
         Instant start = Instant.now();
         long totalOps = 0;
         long bytesProcessed = 0;
         long fileSize = config.getFileSizeBytes();
-        
-        // Use ThreadLocalRandom for thread safety
-        ThreadLocalRandom tlr = ThreadLocalRandom.current();
-        // Use seeded Random if provided for reproducibility
-        Random rng = (random != null) ? random : new Random(tlr.nextLong());
 
         try (FileChannel channel = FileChannel.open(file,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE)) {
-            
-            // Preallocate file for accurate sequential write performance
-            if (config.isPreallocateFiles() && 
+
+            if (config.isPreallocateFiles() &&
                 (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE)) {
                 channel.truncate(fileSize);
             }
 
             while (bytesProcessed < fileSize) {
-                // Determine actual bytes to process (last block may be smaller)
-                int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
-                
-                buffer.clear();  // Reset: position=0, limit=capacity
-                buffer.limit(bytesToProcess);  // Adjust for last block
+                queueSemaphore.acquireUninterruptibly();
+                try {
+                    int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
 
-                if (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE) {
-                    // FIXED: Proper buffer handling for write operations
-                    byte[] temp = new byte[bytesToProcess];
-                    rng.nextBytes(temp);
-                    buffer.put(temp);
-                    buffer.flip();  // Prepare for write: limit=position, position=0
-                    int written = channel.write(buffer);
-                    bytesProcessed += written;
-                    
-                } else {
-                    // Read path
-                    int read = channel.read(buffer);
-                    if (read == -1) {
-                        break; // EOF
+                    buffer.clear();
+                    buffer.limit(bytesToProcess);
+
+                    if (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE) {
+                        byte[] temp = new byte[bytesToProcess];
+                        rng.nextBytes(temp);
+                        buffer.put(temp);
+                        buffer.flip();
+                        int written = channel.write(buffer);
+                        bytesProcessed += written;
+                    } else {
+                        int read = channel.read(buffer);
+                        if (read == -1) {
+                            break;
+                        }
+                        bytesProcessed += read;
                     }
-                    bytesProcessed += read;
-                }
 
-                // FIXED: Unbiased random positioning for random I/O
-                if (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE) {
-                    // Ensure we don't seek past EOF during write
-                    long maxPos = Math.max(0, fileSize - bytesToProcess);
-                    long pos = tlr.nextLong(0, maxPos + 1);  // Java 17+ unbiased method
-                    channel.position(pos);
-                }
+                    if (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE) {
+                        long maxPos = Math.max(0, fileSize - bytesToProcess);
+                        long pos = ThreadLocalRandom.current().nextLong(0, maxPos + 1);
+                        channel.position(pos);
+                    }
 
-                totalOps++;
-                
-                // Configurable sync strategy
-                if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 && 
-                    totalOps % config.getSyncEveryNBlocks() == 0) {
-                    channel.force(false); // Sync metadata only
+                    totalOps++;
+
+                    if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 &&
+                        totalOps % config.getSyncEveryNBlocks() == 0) {
+                        channel.force(false);
+                    }
+                } finally {
+                    queueSemaphore.release();
                 }
             }
 
-            // Final sync if configured
             if (config.isForceSync() && config.getSyncEveryNBlocks() == 0) {
-                channel.force(true); // Sync data and metadata at end
+                channel.force(true);
             }
         }
 
         Instant end = Instant.now();
-        return calculateResult(runId * 1000 + threadId, type, fileSize, start, end, totalOps);
+        return calculateResult(runId, threadId, type, fileSize, start, end, totalOps);
     }
-    
-    /**
-     * Calculate benchmark result with nanosecond precision.
-     */
-    private BenchmarkResult calculateResult(int runId, BenchmarkConfig.TestType type,
+
+    private BenchmarkResult runSingleThreadAsync(Path file, int runId, BenchmarkConfig.TestType type, int threadId)
+            throws IOException {
+
+        ByteBuffer buffer = bufferPool.get();
+        Random rng = getThreadRng(threadId);
+        long fileSize = config.getFileSizeBytes();
+        long bytesProcessed = 0;
+        long totalOps = 0;
+        boolean isWrite = (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE);
+
+        try (AsynchronousFileChannel channel = AsynchronousFileChannel.open(file,
+                StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+
+            if (config.isPreallocateFiles() && isWrite) {
+                try (FileChannel fc = FileChannel.open(file,
+                        StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                    fc.truncate(fileSize);
+                }
+            }
+
+            Instant start = Instant.now();
+
+            while (bytesProcessed < fileSize) {
+                queueSemaphore.acquireUninterruptibly();
+                int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
+                buffer.clear();
+                buffer.limit(bytesToProcess);
+
+                final CountDownLatch opLatch = new CountDownLatch(1);
+                final long[] resultHolder = new long[1];
+                final boolean[] failed = new boolean[1];
+
+                if (isWrite) {
+                    byte[] temp = new byte[bytesToProcess];
+                    rng.nextBytes(temp);
+                    buffer.put(temp);
+                    buffer.flip();
+
+                    channel.write(buffer, channel.size(), null, new CompletionHandler<Integer, Void>() {
+                        @Override
+                        public void completed(Integer written, Void attachment) {
+                            resultHolder[0] = written;
+                            opLatch.countDown();
+                        }
+                        @Override
+                        public void failed(Throwable exc, Void attachment) {
+                            failed[0] = true;
+                            opLatch.countDown();
+                        }
+                    });
+                } else {
+                    channel.read(buffer, bytesProcessed, null, new CompletionHandler<Integer, Void>() {
+                        @Override
+                        public void completed(Integer read, Void attachment) {
+                            resultHolder[0] = read >= 0 ? read : 0;
+                            opLatch.countDown();
+                        }
+                        @Override
+                        public void failed(Throwable exc, Void attachment) {
+                            failed[0] = true;
+                            opLatch.countDown();
+                        }
+                    });
+                }
+
+                try {
+                    opLatch.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    queueSemaphore.release();
+                    throw new IOException("Async I/O interrupted", e);
+                }
+
+                if (failed[0]) {
+                    queueSemaphore.release();
+                    throw new IOException("Async I/O operation failed");
+                }
+
+                bytesProcessed += resultHolder[0];
+                totalOps++;
+
+                if (isWrite && type == BenchmarkConfig.TestType.RAND_WRITE) {
+                    long maxPos = Math.max(0, fileSize - bytesToProcess);
+                    long pos = ThreadLocalRandom.current().nextLong(0, maxPos + 1);
+                }
+
+                queueSemaphore.release();
+
+                if (resultHolder[0] == 0) {
+                    break;
+                }
+            }
+
+            Instant end = Instant.now();
+            return calculateResult(runId, threadId, type, bytesProcessed, start, end, totalOps);
+        }
+    }
+
+    private BenchmarkResult calculateResult(int runId, int threadId, BenchmarkConfig.TestType type,
             long bytesProcessed, Instant start, Instant end, long totalOps) {
-        
+
         Duration elapsed = Duration.between(start, end);
-        long elapsedNanos = elapsed.toNanos();  // High precision
+        long elapsedNanos = elapsed.toNanos();
         double elapsedSeconds = elapsedNanos / 1_000_000_000.0;
-        
-        // High precision calculations
+
         double throughputMBps = (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds;
-        double avgLatencyMs = (elapsedNanos / 1_000_000.0) / totalOps;  // Convert to ms
-        double avgLatencyNs = (double) elapsedNanos / totalOps;  // Keep in nanoseconds
+        double avgLatencyMs = (elapsedNanos / 1_000_000.0) / totalOps;
+        double avgLatencyNs = (double) elapsedNanos / totalOps;
         double iops = totalOps / elapsedSeconds;
 
-        BenchmarkResult result = new BenchmarkResult(runId, type.name(), bytesProcessed, elapsed,
-                throughputMBps, avgLatencyMs, iops, end, elapsedNanos, avgLatencyNs);
-        
+        String rid = String.format("run-%03d-thread-%02d", runId, threadId);
+        BenchmarkResult result = new BenchmarkResult(rid, type.name(), bytesProcessed, elapsed,
+                elapsedNanos, throughputMBps, avgLatencyMs, avgLatencyNs, iops, end);
+
         logger.debug("Run {} completed: type={}, throughput={:.2f} MB/s, latency={:.2f} ms",
-                runId, type, throughputMBps, avgLatencyMs);
+                rid, type, throughputMBps, avgLatencyMs);
         return result;
     }
 
-    /**
-     * Starts periodic polling of real system metrics using OSHI.
-     */
+    @Override
     public void startMetricsPolling() {
-        long pollIntervalMs = config.getMetricsPollInterval().toMillis();
-        metricsPoller.scheduleAtFixedRate(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Instant now = Instant.now();
-                    
-                    // Get CPU usage as a percentage (0-100)
-                    // Using ProcessCpuLoad from OperatingSystemMXBean
-                    com.sun.management.OperatingSystemMXBean osBean = 
-                            (com.sun.management.OperatingSystemMXBean) 
-                            java.lang.management.ManagementFactory.getOperatingSystemMXBean();
-                    double cpuLoad = Math.max(0, osBean.getProcessCpuLoad() * 100);
-                    
-                    // Get real RAM usage
-                    long totalMemory = hardware.getMemory().getTotal();
-                    long availableMemory = hardware.getMemory().getAvailable();
-                    double ramUsage = ((totalMemory - availableMemory) / (double) totalMemory) * 100;
-                    
-                    // Get raw disk I/O counters (removed incorrect utilization %)
-                    long diskReads = 0;
-                    long diskWrites = 0;
-                    long diskReadBytes = 0;
-                    long diskWriteBytes = 0;
-                    try {
-                        java.util.List<oshi.hardware.HWDiskStore> diskStores = hardware.getDiskStores();
-                        if (!diskStores.isEmpty()) {
-                            oshi.hardware.HWDiskStore disk = diskStores.get(0);
-                            diskReads = disk.getReads();
-                            diskWrites = disk.getWrites();
-                            diskReadBytes = disk.getReadBytes();
-                            diskWriteBytes = disk.getWriteBytes();
-                        }
-                    } catch (Exception e) {
-                        logger.debug("Could not retrieve disk counters", e);
-                    }
-                    
-                    MetricsSnapshot snapshot = new MetricsSnapshot(
-                            now,
-                            cpuLoad,
-                            ramUsage,
-                            diskReads,
-                            diskWrites,
-                            diskReadBytes,
-                            diskWriteBytes,
-                            null // Temperature is platform-specific and may not be available
-                    );
-                    metricsLog.add(snapshot);
-                } catch (Exception e) {
-                    logger.warn("Error collecting metrics", e);
-                }
-            }
-        }, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
+        metricsCollector.start();
     }
 
-    /**
-     * Returns an unmodifiable list of collected metrics.
-     */
+    @Override
     public List<MetricsSnapshot> getMetricsLog() {
-        return Collections.unmodifiableList(metricsLog);
+        return metricsCollector.getMetricsLog();
     }
 
-    /**
-     * Properly shuts down all executor services with timeout.
-     */
     private void shutdownExecutors() {
         logger.info("Shutting down executors");
-        
-        metricsPoller.shutdown();
+        metricsCollector.stop();
         ioExecutor.shutdown();
 
         try {
-            // Wait up to 30 seconds for tasks to complete
             if (!ioExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
                 logger.warn("IO executor tasks did not complete within timeout, forcing shutdown");
                 ioExecutor.shutdownNow();
@@ -343,14 +389,8 @@ public final class BenchmarkRunner {
                     logger.error("IO executor did not terminate after forced shutdown");
                 }
             }
-            
-            if (!metricsPoller.awaitTermination(5, TimeUnit.SECONDS)) {
-                logger.warn("Metrics poller did not complete within timeout, forcing shutdown");
-                metricsPoller.shutdownNow();
-            }
         } catch (InterruptedException e) {
             logger.error("Interrupted while waiting for executor shutdown", e);
-            // Preserve interrupt status
             Thread.currentThread().interrupt();
         }
     }

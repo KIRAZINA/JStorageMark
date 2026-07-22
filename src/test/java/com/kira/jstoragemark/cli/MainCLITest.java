@@ -14,9 +14,6 @@ import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.*;
 
-/**
- * Unit tests for CLI Main argument parsing and validation.
- */
 class MainCLITest {
 
     @TempDir
@@ -26,6 +23,8 @@ class MainCLITest {
     private final ByteArrayOutputStream errContent = new ByteArrayOutputStream();
     private final PrintStream originalOut = System.out;
     private final PrintStream originalErr = System.err;
+
+    private static final long ONE_GB = 1024L * 1024 * 1024;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -40,23 +39,20 @@ class MainCLITest {
         System.setErr(originalErr);
     }
 
-    // ==================== Basic Execution Tests ====================
-
     @Test
     @DisplayName("Main should run with minimal arguments")
     void mainShouldRunWithMinimalArgs() {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(64 * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-b", String.valueOf(64 * 1024),
                 "-n", "1",
                 "-i", "1",
                 "-q", "1"
         };
 
-        // Should complete without exception
-        assertThatNoException().isThrownBy(() -> Main.main(args));
+        assertThat(Main.run(args)).isEqualTo(0);
     }
 
     @Test
@@ -65,12 +61,12 @@ class MainCLITest {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE,SEQ_READ",
-                "-s", String.valueOf(64 * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "1"
         };
 
-        assertThatNoException().isThrownBy(() -> Main.main(args));
+        assertThat(Main.run(args)).isEqualTo(0);
     }
 
     @Test
@@ -79,12 +75,12 @@ class MainCLITest {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(64 * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "1"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] files = tempDir.toFile().listFiles((dir, name) -> name.endsWith(".csv"));
         assertThat(files).isNotNull();
@@ -97,12 +93,12 @@ class MainCLITest {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(64 * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "1"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] files = tempDir.toFile().listFiles((dir, name) -> name.endsWith(".json"));
         assertThat(files).isNotNull();
@@ -115,20 +111,18 @@ class MainCLITest {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(64 * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "1",
                 "-html"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] files = tempDir.toFile().listFiles((dir, name) -> name.endsWith(".html"));
         assertThat(files).isNotNull();
         assertThat(files.length).isGreaterThan(0);
     }
-
-    // ==================== Argument Parsing Tests ====================
 
     @Test
     @DisplayName("Main should use defaults for optional arguments")
@@ -138,16 +132,16 @@ class MainCLITest {
                 "-t", "SEQ_WRITE"
         };
 
-        assertThatNoException().isThrownBy(() -> Main.main(args));
+        assertThat(Main.run(args)).isEqualTo(0);
     }
 
     @Test
     @DisplayName("Main should handle different file sizes")
     void mainShouldHandleDifferentFileSizes() {
         long[] sizes = {
-                1024L * 1024 * 1024,      // 1 GB
-                2L * 1024 * 1024 * 1024,  // 2 GB
-                512L * 1024 * 1024        // 512 MB
+                ONE_GB,
+                2L * 1024 * 1024 * 1024,
+                5L * 1024 * 1024 * 1024
         };
 
         for (long size : sizes) {
@@ -159,9 +153,9 @@ class MainCLITest {
                     "-i", "1"
             };
 
-            assertThatNoException()
+            assertThat(Main.run(args))
                     .as("Should handle file size: " + size)
-                    .isThrownBy(() -> Main.main(args));
+                    .isEqualTo(0);
         }
     }
 
@@ -174,14 +168,15 @@ class MainCLITest {
             String[] args = {
                     "-d", tempDir.toString(),
                     "-t", "SEQ_WRITE",
+                    "-s", String.valueOf(ONE_GB),
                     "-b", String.valueOf(blockSize),
                     "-n", "1",
                     "-i", "1"
             };
 
-            assertThatNoException()
+            assertThat(Main.run(args))
                     .as("Should handle block size: " + blockSize)
-                    .isThrownBy(() -> Main.main(args));
+                    .isEqualTo(0);
         }
     }
 
@@ -194,13 +189,14 @@ class MainCLITest {
             String[] args = {
                     "-d", tempDir.toString(),
                     "-t", "SEQ_WRITE",
+                    "-s", String.valueOf(ONE_GB),
                     "-n", String.valueOf(threads),
                     "-i", "1"
             };
 
-            assertThatNoException()
+            assertThat(Main.run(args))
                     .as("Should handle thread count: " + threads)
-                    .isThrownBy(() -> Main.main(args));
+                    .isEqualTo(0);
         }
     }
 
@@ -213,110 +209,75 @@ class MainCLITest {
             String[] args = {
                     "-d", tempDir.toString(),
                     "-t", "SEQ_WRITE",
+                    "-s", String.valueOf(ONE_GB),
                     "-n", "1",
                     "-i", String.valueOf(iterations)
             };
 
-            assertThatNoException()
+            assertThat(Main.run(args))
                     .as("Should handle iteration count: " + iterations)
-                    .isThrownBy(() -> Main.main(args));
+                    .isEqualTo(0);
         }
     }
 
-    // ==================== Error Handling Tests ====================
-
     @Test
-    @DisplayName("Main should exit with error for non-existent directory")
-    void mainShouldExitForNonExistentDirectory() {
+    @DisplayName("Main should return error for non-existent directory")
+    void mainShouldReturnErrorForNonExistentDirectory() {
         String[] args = {
                 "-d", "/nonexistent/directory/path",
                 "-t", "SEQ_WRITE"
         };
 
-        // Capture exit code
-        SecurityManager original = System.getSecurityManager();
-        try {
-            System.setSecurityManager(new NoExitSecurityManager());
-            assertThatThrownBy(() -> Main.main(args))
-                    .isInstanceOf(SecurityException.class);
-        } finally {
-            System.setSecurityManager(original);
-        }
+        assertThat(Main.run(args)).isNotEqualTo(0);
     }
 
     @Test
-    @DisplayName("Main should exit with error for invalid test type")
-    void mainShouldExitForInvalidTestType() {
+    @DisplayName("Main should return error for invalid test type")
+    void mainShouldReturnErrorForInvalidTestType() {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "INVALID_TYPE"
         };
 
-        SecurityManager original = System.getSecurityManager();
-        try {
-            System.setSecurityManager(new NoExitSecurityManager());
-            assertThatThrownBy(() -> Main.main(args))
-                    .isInstanceOf(SecurityException.class);
-        } finally {
-            System.setSecurityManager(original);
-        }
+        assertThat(Main.run(args)).isNotEqualTo(0);
     }
 
     @Test
-    @DisplayName("Main should exit with error for negative file size")
-    void mainShouldExitForNegativeFileSize() {
+    @DisplayName("Main should return error for negative file size")
+    void mainShouldReturnErrorForNegativeFileSize() {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
                 "-s", "-1000"
         };
 
-        SecurityManager original = System.getSecurityManager();
-        try {
-            System.setSecurityManager(new NoExitSecurityManager());
-            assertThatThrownBy(() -> Main.main(args))
-                    .isInstanceOf(SecurityException.class);
-        } finally {
-            System.setSecurityManager(original);
-        }
+        assertThat(Main.run(args)).isNotEqualTo(0);
     }
 
     @Test
-    @DisplayName("Main should exit with error for invalid block size")
-    void mainShouldExitForInvalidBlockSize() {
+    @DisplayName("Main should return error for invalid block size")
+    void mainShouldReturnErrorForInvalidBlockSize() {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-b", "100"  // Too small
+                "-s", String.valueOf(ONE_GB),
+                "-b", "100"
         };
 
-        SecurityManager original = System.getSecurityManager();
-        try {
-            System.setSecurityManager(new NoExitSecurityManager());
-            assertThatThrownBy(() -> Main.main(args))
-                    .isInstanceOf(SecurityException.class);
-        } finally {
-            System.setSecurityManager(original);
-        }
+        assertThat(Main.run(args)).isNotEqualTo(0);
     }
 
     @Test
-    @DisplayName("Main should exit with error for zero threads")
-    void mainShouldExitForZeroThreads() {
+    @DisplayName("Main should return error for zero threads")
+    void mainShouldReturnErrorForZeroThreads() {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
+                "-s", String.valueOf(ONE_GB),
                 "-n", "0"
         };
 
-        SecurityManager original = System.getSecurityManager();
-        try {
-            System.setSecurityManager(new NoExitSecurityManager());
-            assertThatThrownBy(() -> Main.main(args))
-                    .isInstanceOf(SecurityException.class);
-        } finally {
-            System.setSecurityManager(original);
-        }
+        assertThat(Main.run(args)).isNotEqualTo(0);
     }
 
     @Test
@@ -324,19 +285,9 @@ class MainCLITest {
     void mainShouldPrintHelpWithNoArgs() {
         String[] args = {};
 
-        SecurityManager original = System.getSecurityManager();
-        try {
-            System.setSecurityManager(new NoExitSecurityManager());
-            assertThatThrownBy(() -> Main.main(args))
-                    .isInstanceOf(SecurityException.class);
-        } finally {
-            System.setSecurityManager(original);
-        }
-
+        assertThat(Main.run(args)).isNotEqualTo(0);
         assertThat(errContent.toString()).containsIgnoringCase("usage");
     }
-
-    // ==================== Retain Files Tests ====================
 
     @Test
     @DisplayName("Main should retain test files when -r flag is used")
@@ -344,19 +295,14 @@ class MainCLITest {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(64 * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "1",
                 "-r"
         };
 
-        Main.main(args);
-
-        // Files should be retained (but we can't easily verify since they're in subdirectories)
-        // Just verify it runs successfully
+        assertThat(Main.run(args)).isEqualTo(0);
     }
-
-    // ==================== Verbosity Tests ====================
 
     @Test
     @DisplayName("Main should handle verbosity level 0")
@@ -364,12 +310,13 @@ class MainCLITest {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
+                "-s", String.valueOf(ONE_GB),
                 "-v", "0",
                 "-n", "1",
                 "-i", "1"
         };
 
-        assertThatNoException().isThrownBy(() -> Main.main(args));
+        assertThat(Main.run(args)).isEqualTo(0);
     }
 
     @Test
@@ -378,27 +325,54 @@ class MainCLITest {
         String[] args = {
                 "-d", tempDir.toString(),
                 "-t", "SEQ_WRITE",
+                "-s", String.valueOf(ONE_GB),
                 "-v", "2",
                 "-n", "1",
                 "-i", "1"
         };
 
-        assertThatNoException().isThrownBy(() -> Main.main(args));
+        assertThat(Main.run(args)).isEqualTo(0);
     }
 
-    /**
-     * Security manager that prevents System.exit from actually exiting
-     * and instead throws a SecurityException.
-     */
-    private static class NoExitSecurityManager extends SecurityManager {
-        @Override
-        public void checkExit(int status) {
-            throw new SecurityException("System.exit(" + status + ") blocked");
-        }
+    @Test
+    @DisplayName("--version should print version and exit with code 0")
+    void versionFlagShouldPrintVersion() {
+        String[] args = {"--version"};
+        assertThat(Main.run(args)).isEqualTo(0);
+        assertThat(outContent.toString()).contains("1.1.0");
+    }
 
-        @Override
-        public void checkPermission(java.security.Permission perm) {
-            // Allow all other permissions
-        }
+    @Test
+    @DisplayName("parseFileSize should handle G suffix")
+    void parseFileSizeShouldHandleGigabyteSuffix() {
+        assertThat(Main.parseFileSize("1G")).isEqualTo(1024L * 1024 * 1024);
+        assertThat(Main.parseFileSize("5G")).isEqualTo(5L * 1024 * 1024 * 1024);
+    }
+
+    @Test
+    @DisplayName("parseFileSize should handle M suffix")
+    void parseFileSizeShouldHandleMegabyteSuffix() {
+        assertThat(Main.parseFileSize("1024M")).isEqualTo(1024L * 1024 * 1024);
+    }
+
+    @Test
+    @DisplayName("parseFileSize should handle raw bytes")
+    void parseFileSizeShouldHandleRawBytes() {
+        assertThat(Main.parseFileSize("1073741824")).isEqualTo(1024L * 1024 * 1024);
+    }
+
+    @Test
+    @DisplayName("parseFileSize should handle K suffix")
+    void parseFileSizeShouldHandleKilobyteSuffix() {
+        assertThat(Main.parseFileSize("1048576K")).isEqualTo(1024L * 1024 * 1024);
+    }
+
+    @Test
+    @DisplayName("parseFileSize should throw on out-of-range values")
+    void parseFileSizeShouldThrowOnOutOfRange() {
+        assertThatThrownBy(() -> Main.parseFileSize("500M"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Main.parseFileSize("20G"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

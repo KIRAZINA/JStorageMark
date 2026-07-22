@@ -34,6 +34,7 @@ import javax.swing.table.DefaultTableModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.kira.jstoragemark.config.AppConstants;
 import com.kira.jstoragemark.config.BenchmarkConfig;
 import com.kira.jstoragemark.core.BenchmarkRunner;
 import com.kira.jstoragemark.fs.BenchmarkPaths;
@@ -55,7 +56,6 @@ public class BenchmarkUI {
         frame.setMinimumSize(new Dimension(800, 600));
         frame.setLayout(new BorderLayout(10, 10));
 
-        // Settings panel with better layout for resizing
         JPanel inputPanel = new JPanel(new GridBagLayout());
         inputPanel.setBorder(BorderFactory.createTitledBorder("Benchmark Configuration"));
         GridBagConstraints gbc = new GridBagConstraints();
@@ -63,20 +63,18 @@ public class BenchmarkUI {
         gbc.anchor = GridBagConstraints.WEST;
         gbc.fill = GridBagConstraints.HORIZONTAL;
 
-        JTextField dirField = new JTextField("./jstoragemark-tests", 20);
-        JTextField sizeField = new JTextField("5368709120", 15); // 5 GB
-        JTextField blockField = new JTextField("65536", 10);      // 64 KB
+        JTextField dirField = new JTextField(AppConstants.DEFAULT_TEST_DIR, 20);
+        JTextField sizeField = new JTextField("5G", 15);
+        JTextField blockField = new JTextField("65536", 10);
         JTextField threadsField = new JTextField("4", 5);
         JTextField iterationsField = new JTextField("5", 5);
         JTextField queueField = new JTextField("8", 5);
 
-        // Multiple test type selection using checkboxes with normal appearance
         JCheckBox seqReadBox = new JCheckBox("SEQ_READ", true);
         JCheckBox seqWriteBox = new JCheckBox("SEQ_WRITE", true);
         JCheckBox randReadBox = new JCheckBox("RAND_READ");
         JCheckBox randWriteBox = new JCheckBox("RAND_WRITE");
 
-        // Fix checkbox appearance
         seqReadBox.setOpaque(false);
         seqWriteBox.setOpaque(false);
         randReadBox.setOpaque(false);
@@ -91,13 +89,11 @@ public class BenchmarkUI {
 
         JCheckBox htmlReportBox = new JCheckBox("Generate HTML report");
 
-        // Advanced options with normal appearance
         JCheckBox forceSyncBox = new JCheckBox("Force sync after writes", true);
-        JTextField syncEveryField = new JTextField("0", 10); // 0 = only at end
+        JTextField syncEveryField = new JTextField("0", 10);
         JCheckBox preallocateBox = new JCheckBox("Preallocate files", true);
         JCheckBox directBufferBox = new JCheckBox("Use direct buffer", true);
 
-        // Fix checkbox appearance
         forceSyncBox.setOpaque(false);
         preallocateBox.setOpaque(false);
         directBufferBox.setOpaque(false);
@@ -106,7 +102,6 @@ public class BenchmarkUI {
         JButton copyButton = new JButton("Copy Results");
         JButton clearButton = new JButton("Clear Results");
 
-        // Add components using GridBagLayout for better resizing
         gbc.gridx = 0; gbc.gridy = 0;
         inputPanel.add(new JLabel("Test Directory:"), gbc);
         gbc.gridx = 1; gbc.weightx = 1.0;
@@ -177,7 +172,6 @@ public class BenchmarkUI {
         gbc.gridx = 1; gbc.gridy = 12; gbc.weightx = 1.0;
         inputPanel.add(buttonPanel, gbc);
 
-        // Table for results
         String[] columnNames = {"RunId", "TestType", "Throughput (MB/s)", "Latency (ms)", "IOPS"};
         DefaultTableModel tableModel = new DefaultTableModel(columnNames, 0) {
             @Override
@@ -189,7 +183,6 @@ public class BenchmarkUI {
         resultTable.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
         JScrollPane scrollPane = new JScrollPane(resultTable);
 
-        // Progress bar with label
         JPanel progressPanel = new JPanel(new BorderLayout());
         JProgressBar progressBar = new JProgressBar();
         progressBar.setStringPainted(true);
@@ -203,10 +196,8 @@ public class BenchmarkUI {
         frame.add(progressPanel, BorderLayout.SOUTH);
         frame.setVisible(true);
 
-        // Launch logic
         runButton.addActionListener(e -> {
             try {
-                // Validate inputs
                 Path testDir = validateAndGetPath(dirField.getText());
                 long fileSize = validateFileSize(sizeField.getText());
                 int blockSize = validateBlockSize(blockField.getText());
@@ -215,7 +206,11 @@ public class BenchmarkUI {
                 int queueDepth = validateQueueDepth(queueField.getText());
                 int syncEvery = validateSyncEvery(syncEveryField.getText());
 
-                // Collect selected test types
+                if (queueDepth > threads * 2) {
+                    queueDepth = threads * 2;
+                }
+                final int effectiveQueueDepth = queueDepth;
+
                 java.util.Set<BenchmarkConfig.TestType> testTypes = new java.util.LinkedHashSet<>();
                 if (seqReadBox.isSelected()) testTypes.add(BenchmarkConfig.TestType.SEQ_READ);
                 if (seqWriteBox.isSelected()) testTypes.add(BenchmarkConfig.TestType.SEQ_WRITE);
@@ -228,7 +223,6 @@ public class BenchmarkUI {
                     return;
                 }
 
-                // Update UI
                 runButton.setEnabled(false);
                 copyButton.setEnabled(false);
                 clearButton.setEnabled(false);
@@ -248,7 +242,7 @@ public class BenchmarkUI {
                                     .blockSizeBytes(blockSize)
                                     .threads(threads)
                                     .iterations(iterations)
-                                    .queueDepth(queueDepth)
+                                    .queueDepth(effectiveQueueDepth)
                                     .forceSync(forceSyncBox.isSelected())
                                     .syncEveryNBlocks(syncEvery)
                                     .preallocateFiles(preallocateBox.isSelected())
@@ -263,22 +257,20 @@ public class BenchmarkUI {
                             builder.addReportFormat(BenchmarkConfig.ReportFormat.JSON);
 
                             BenchmarkConfig config = builder.build();
-                            BenchmarkPaths paths = new BenchmarkPaths(config.getTestDirectory(), 
+                            BenchmarkPaths paths = new BenchmarkPaths(config.getTestDirectory(),
                                     config.getSessionId());
 
                             BenchmarkRunner runner = new BenchmarkRunner(config, paths);
                             runner.startMetricsPolling();
 
-                            // Calculate total operations
                             int totalRuns = testTypes.size() * iterations;
 
-                            SwingUtilities.invokeLater(() -> 
+                            SwingUtilities.invokeLater(() ->
                                 progressLabel.setText(String.format("Running %d benchmark(s)...", totalRuns)));
 
                             List<BenchmarkResult> results = runner.runAll();
                             List<MetricsSnapshot> metrics = runner.getMetricsLog();
 
-                            // Update progress to 90%
                             SwingUtilities.invokeLater(() -> {
                                 progressBar.setValue(90);
                                 progressLabel.setText("Generating reports...");
@@ -286,10 +278,9 @@ public class BenchmarkUI {
 
                             ReportGenerator generator = new ReportGenerator(config, paths);
                             generator.writeCsv(results);
-                            generator.writeJson(results, metrics);
-                            generator.writeHtml(results, metrics);
+                            generator.writeJson(results, metrics, runner.getSystemInfo());
+                            generator.writeHtml(results, metrics, runner.getSystemInfo());
 
-                            // Update progress to 100%
                             SwingUtilities.invokeLater(() -> {
                                 progressBar.setValue(100);
                                 progressLabel.setText("Completed successfully!");
@@ -310,7 +301,6 @@ public class BenchmarkUI {
 
                     @Override
                     protected void process(List<String> chunks) {
-                        // Update progress incrementally
                         for (String message : chunks) {
                             progressLabel.setText(message);
                         }
@@ -320,33 +310,30 @@ public class BenchmarkUI {
                     protected void done() {
                         try {
                             List<BenchmarkResult> results = get();
-                            
-                            // Clear table
+
                             tableModel.setRowCount(0);
 
-                            // Fill table with results
                             for (BenchmarkResult r : results) {
                                 Vector<Object> row = new Vector<>();
-                                row.add(r.getRunId());
-                                row.add(r.getTestType());
-                                row.add(String.format(Locale.ROOT, "%.2f", r.getThroughputMBps()));
-                                row.add(String.format(Locale.ROOT, "%.2f", r.getAvgLatencyMs()));
-                                row.add(String.format(Locale.ROOT, "%.2f", r.getIops()));
+                                row.add(r.runId());
+                                row.add(r.testType());
+                                row.add(String.format(Locale.ROOT, "%.2f", r.throughputMBps()));
+                                row.add(String.format(Locale.ROOT, "%.2f", r.avgLatencyMs()));
+                                row.add(String.format(Locale.ROOT, "%.2f", r.iops()));
                                 tableModel.addRow(row);
                             }
 
-                            // Add average row
                             if (!results.isEmpty()) {
                                 double avgThroughput = results.stream()
-                                        .mapToDouble(BenchmarkResult::getThroughputMBps)
+                                        .mapToDouble(BenchmarkResult::throughputMBps)
                                         .average()
                                         .orElse(0);
                                 double avgLatency = results.stream()
-                                        .mapToDouble(BenchmarkResult::getAvgLatencyMs)
+                                        .mapToDouble(BenchmarkResult::avgLatencyMs)
                                         .average()
                                         .orElse(0);
                                 double avgIops = results.stream()
-                                        .mapToDouble(BenchmarkResult::getIops)
+                                        .mapToDouble(BenchmarkResult::iops)
                                         .average()
                                         .orElse(0);
 
@@ -365,7 +352,7 @@ public class BenchmarkUI {
                             Throwable cause = ex.getCause();
                             if (cause instanceof IllegalArgumentException) {
                                 SwingUtilities.invokeLater(() -> {
-                                    JOptionPane.showMessageDialog(frame, 
+                                    JOptionPane.showMessageDialog(frame,
                                         "Configuration Error: " + cause.getMessage(),
                                         "Benchmark Failed", JOptionPane.ERROR_MESSAGE);
                                     progressBar.setVisible(false);
@@ -374,7 +361,7 @@ public class BenchmarkUI {
                                 });
                             } else if (cause instanceof IOException) {
                                 SwingUtilities.invokeLater(() -> {
-                                    JOptionPane.showMessageDialog(frame, 
+                                    JOptionPane.showMessageDialog(frame,
                                         "IO Error: " + cause.getMessage(),
                                         "Benchmark Failed", JOptionPane.ERROR_MESSAGE);
                                     progressBar.setVisible(false);
@@ -383,7 +370,7 @@ public class BenchmarkUI {
                                 });
                             } else {
                                 SwingUtilities.invokeLater(() -> {
-                                    JOptionPane.showMessageDialog(frame, 
+                                    JOptionPane.showMessageDialog(frame,
                                         "Error: " + (cause != null ? cause.getMessage() : ex.getMessage()),
                                         "Benchmark Failed", JOptionPane.ERROR_MESSAGE);
                                     progressBar.setVisible(false);
@@ -415,7 +402,6 @@ public class BenchmarkUI {
             }
         });
 
-        // Copy button
         copyButton.addActionListener(e -> {
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < tableModel.getRowCount(); i++) {
@@ -431,7 +417,6 @@ public class BenchmarkUI {
             logger.info("Results copied to clipboard");
         });
 
-        // Clear button
         clearButton.addActionListener(e -> {
             tableModel.setRowCount(0);
             progressBar.setVisible(false);
@@ -469,11 +454,10 @@ public class BenchmarkUI {
     private static long validateFileSize(String sizeStr) throws IllegalArgumentException {
         try {
             long size = Long.parseLong(sizeStr.trim());
-            if (size <= 0) {
-                throw new IllegalArgumentException("File size must be positive");
-            }
-            if (size < 1024 * 1024) {
-                throw new IllegalArgumentException("File size must be at least 1 MB");
+            long minBytes = 1L * 1024 * 1024 * 1024;
+            long maxBytes = 10L * 1024 * 1024 * 1024;
+            if (size < minBytes || size > maxBytes) {
+                throw new IllegalArgumentException("File size must be between 1 GB and 10 GB");
             }
             return size;
         } catch (NumberFormatException e) {
@@ -484,8 +468,8 @@ public class BenchmarkUI {
     private static int validateBlockSize(String blockStr) throws IllegalArgumentException {
         try {
             int size = Integer.parseInt(blockStr.trim());
-            if (size < 512 || size > 16 * 1024 * 1024) {
-                throw new IllegalArgumentException("Block size must be between 512 bytes and 16 MB");
+            if (size < 4 * 1024 || size > 1 * 1024 * 1024) {
+                throw new IllegalArgumentException("Block size must be between 4 KB and 1 MB");
             }
             return size;
         } catch (NumberFormatException e) {
@@ -496,8 +480,8 @@ public class BenchmarkUI {
     private static int validateThreads(String threadStr) throws IllegalArgumentException {
         try {
             int threads = Integer.parseInt(threadStr.trim());
-            if (threads < 1 || threads > 128) {
-                throw new IllegalArgumentException("Threads must be between 1 and 128");
+            if (threads < 1 || threads > 32) {
+                throw new IllegalArgumentException("Threads must be between 1 and 32");
             }
             return threads;
         } catch (NumberFormatException e) {

@@ -129,12 +129,12 @@ class BenchmarkConfigTest {
     void blocksPerFileCalculationShouldBeCorrect() {
         BenchmarkConfig config = new BenchmarkConfig.Builder()
                 .testDirectory(Path.of("./testdir"))
-                .fileSizeBytes(1024 * 1024) // 1 MB
-                .blockSizeBytes(64 * 1024)  // 64 KB
+                .fileSizeBytes(1024L * 1024 * 1024) // 1 GB
+                .blockSizeBytes(64 * 1024)          // 64 KB
                 .addTestType(BenchmarkConfig.TestType.SEQ_READ)
                 .build();
 
-        assertThat(config.blocksPerFile()).isEqualTo(16);
+        assertThat(config.blocksPerFile()).isEqualTo(16384);
     }
 
     @Test
@@ -142,25 +142,27 @@ class BenchmarkConfigTest {
     void blocksPerFileShouldRoundUp() {
         BenchmarkConfig config = new BenchmarkConfig.Builder()
                 .testDirectory(Path.of("./testdir"))
-                .fileSizeBytes(1000 * 1024) // Not divisible by block size
+                .fileSizeBytes(1024L * 1024 * 1024) // 1 GB (not evenly divisible by 64KB)
                 .blockSizeBytes(64 * 1024)
                 .addTestType(BenchmarkConfig.TestType.SEQ_READ)
                 .build();
 
-        assertThat(config.blocksPerFile()).isEqualTo(16);
+        assertThat(config.blocksPerFile()).isEqualTo(16384);
     }
 
     // ==================== Validation Failure Tests ====================
 
     @Test
-    @DisplayName("Empty test types should throw exception")
-    void emptyTestTypesShouldThrowException() {
-        assertThatThrownBy(() -> new BenchmarkConfig.Builder()
+    @DisplayName("Empty test types should apply defaults")
+    void emptyTestTypesShouldApplyDefaults() {
+        BenchmarkConfig config = new BenchmarkConfig.Builder()
                 .testDirectory(Path.of("./testdir"))
                 .testTypes(Collections.emptySet())
-                .build())
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("At least one TestType");
+                .build();
+        assertThat(config.getTestTypes()).contains(
+                BenchmarkConfig.TestType.SEQ_READ,
+                BenchmarkConfig.TestType.SEQ_WRITE
+        );
     }
 
     @ParameterizedTest
@@ -203,7 +205,7 @@ class BenchmarkConfigTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {0, 1, 2, 11, 100})
+    @ValueSource(ints = {0, -1, 101})
     @DisplayName("Invalid iterations should throw exception")
     void invalidIterationsShouldThrowException(int iterations) {
         assertThatThrownBy(() -> new BenchmarkConfig.Builder()

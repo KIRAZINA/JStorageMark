@@ -6,20 +6,21 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
+import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.*;
 
-/**
- * Integration tests for the full CLI workflow.
- * Runs Main with arguments, then checks that reports are generated.
- */
 class MainIntegrationTest {
 
     @TempDir
     Path testDir;
+
+    private static final long ONE_GB = 1024L * 1024 * 1024;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -28,7 +29,6 @@ class MainIntegrationTest {
 
     @AfterEach
     void tearDown() {
-        // Cleanup test files
         File[] files = testDir.toFile().listFiles();
         if (files != null) {
             for (File file : files) {
@@ -39,18 +39,18 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("Full workflow should generate CSV and JSON reports")
-    void fullWorkflowShouldGenerateReports() throws Exception {
+    void fullWorkflowShouldGenerateReports() {
         String[] args = {
                 "-d", testDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(1024L * 1024 * 1024), // 1 GB
-                "-b", String.valueOf(4 * 1024),             // 4 KB
+                "-s", String.valueOf(ONE_GB),
+                "-b", String.valueOf(4 * 1024),
                 "-n", "1",
                 "-i", "3",
                 "-q", "1"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] files = testDir.toFile().listFiles();
         assertThat(files).isNotNull();
@@ -61,19 +61,19 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("Full workflow should generate all report types")
-    void fullWorkflowShouldGenerateAllReportTypes() throws Exception {
+    void fullWorkflowShouldGenerateAllReportTypes() {
         String[] args = {
                 "-d", testDir.toString(),
                 "-t", "SEQ_WRITE,SEQ_READ",
-                "-s", String.valueOf(512L * 1024 * 1024),  // 512 MB
-                "-b", String.valueOf(64 * 1024),           // 64 KB
+                "-s", String.valueOf(ONE_GB),
+                "-b", String.valueOf(64 * 1024),
                 "-n", "2",
                 "-i", "2",
                 "-q", "4",
                 "-html"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] files = testDir.toFile().listFiles();
         assertThat(files).isNotNull();
@@ -85,18 +85,18 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("Full workflow with random tests should complete")
-    void fullWorkflowWithRandomTests() throws Exception {
+    void fullWorkflowWithRandomTests() {
         String[] args = {
                 "-d", testDir.toString(),
                 "-t", "RAND_WRITE,RAND_READ",
-                "-s", String.valueOf(256L * 1024 * 1024),  // 256 MB
-                "-b", String.valueOf(16 * 1024),           // 16 KB
+                "-s", String.valueOf(ONE_GB),
+                "-b", String.valueOf(16 * 1024),
                 "-n", "1",
                 "-i", "2",
                 "-q", "2"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] csvFiles = testDir.toFile().listFiles((dir, name) -> name.endsWith(".csv"));
         assertThat(csvFiles).isNotNull();
@@ -105,21 +105,20 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("Full workflow with all test types should complete")
-    void fullWorkflowWithAllTestTypes() throws Exception {
+    void fullWorkflowWithAllTestTypes() {
         String[] args = {
                 "-d", testDir.toString(),
                 "-t", "SEQ_WRITE,SEQ_READ,RAND_WRITE,RAND_READ",
-                "-s", String.valueOf(128L * 1024 * 1024),  // 128 MB
-                "-b", String.valueOf(32 * 1024),           // 32 KB
+                "-s", String.valueOf(ONE_GB),
+                "-b", String.valueOf(32 * 1024),
                 "-n", "1",
                 "-i", "1",
                 "-q", "1",
-                "-r"  // Retain test files
+                "-r"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
-        // Should have CSV and JSON reports
         File[] csvFiles = testDir.toFile().listFiles((dir, name) -> name.endsWith(".csv"));
         File[] jsonFiles = testDir.toFile().listFiles((dir, name) -> name.endsWith(".json"));
 
@@ -131,16 +130,16 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("CSV report should contain correct data")
-    void csvReportShouldContainCorrectData() throws Exception {
+    void csvReportShouldContainCorrectData() throws IOException {
         String[] args = {
                 "-d", testDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(256L * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "2"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] csvFiles = testDir.toFile().listFiles((dir, name) -> name.endsWith(".csv"));
         assertThat(csvFiles).isNotNull();
@@ -158,16 +157,16 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("JSON report should be valid JSON")
-    void jsonReportShouldBeValid() throws Exception {
+    void jsonReportShouldBeValid() throws IOException {
         String[] args = {
                 "-d", testDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(256L * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "2"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] jsonFiles = testDir.toFile().listFiles((dir, name) -> name.endsWith(".json"));
         assertThat(jsonFiles).isNotNull();
@@ -175,7 +174,6 @@ class MainIntegrationTest {
 
         String content = Files.readString(jsonFiles[0].toPath());
 
-        // Basic JSON validation
         assertThat(content).startsWith("{").endsWith("}");
         assertThat(content).contains("\"results\"");
         assertThat(content).contains("\"metrics\"");
@@ -184,17 +182,17 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("HTML report should be valid HTML when requested")
-    void htmlReportShouldBeValid() throws Exception {
+    void htmlReportShouldBeValid() throws IOException {
         String[] args = {
                 "-d", testDir.toString(),
                 "-t", "SEQ_WRITE",
-                "-s", String.valueOf(256L * 1024 * 1024),
+                "-s", String.valueOf(ONE_GB),
                 "-n", "1",
                 "-i", "1",
                 "-html"
         };
 
-        Main.main(args);
+        assertThat(Main.run(args)).isEqualTo(0);
 
         File[] htmlFiles = testDir.toFile().listFiles((dir, name) -> name.endsWith(".html"));
         assertThat(htmlFiles).isNotNull();
@@ -211,21 +209,21 @@ class MainIntegrationTest {
 
     @Test
     @DisplayName("Workflow should output benchmark results to console")
-    void workflowShouldOutputResultsToConsole() throws Exception {
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-        java.io.PrintStream originalOut = System.out;
-        System.setOut(new java.io.PrintStream(out));
+    void workflowShouldOutputResultsToConsole() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        PrintStream originalOut = System.out;
+        System.setOut(new PrintStream(out));
 
         try {
             String[] args = {
                     "-d", testDir.toString(),
                     "-t", "SEQ_WRITE",
-                    "-s", String.valueOf(128L * 1024 * 1024),
+                    "-s", String.valueOf(ONE_GB),
                     "-n", "1",
                     "-i", "1"
             };
 
-            Main.main(args);
+            assertThat(Main.run(args)).isEqualTo(0);
 
             String output = out.toString();
             assertThat(output)

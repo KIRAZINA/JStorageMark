@@ -20,7 +20,7 @@ import java.util.Objects;
  * - Provides a simple free-space validation using FileStore.
  * - Naming scheme uses sessionId + runId to avoid collisions and aids cleanup.
  */
-public final class BenchmarkPaths {
+public final class BenchmarkPaths implements IBenchmarkPaths {
 
     private final Path baseDir;
     private final String sessionId;
