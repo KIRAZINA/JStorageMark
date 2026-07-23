@@ -7,6 +7,7 @@ import com.kira.jstoragemark.result.BenchmarkResult;
 import com.kira.jstoragemark.metrics.MetricsSnapshot;
 import com.kira.jstoragemark.metrics.IMetricsCollector;
 import com.kira.jstoragemark.metrics.MetricsCollector;
+import org.HdrHistogram.Histogram;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import oshi.SystemInfo;
@@ -24,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class BenchmarkRunner implements IBenchmarkRunner {
     private static final Logger logger = LoggerFactory.getLogger(BenchmarkRunner.class);
@@ -42,6 +44,13 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
 
     private final Semaphore queueSemaphore;
     private final SystemInfoSnapshot systemInfo;
+
+    private final AtomicLong progressBytesProcessed = new AtomicLong(0);
+    private final Instant progressStartTime = Instant.now();
+    private volatile BenchmarkConfig.TestType currentTestType;
+    private volatile int currentIteration;
+    private volatile int totalIterations;
+    private ScheduledExecutorService progressExecutor;
 
     public BenchmarkRunner(BenchmarkConfig config, BenchmarkPaths paths) {
         this.config = Objects.requireNonNull(config, "config must not be null");
@@ -122,19 +131,66 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
             }
 
             runId = 1;
+            totalIterations = config.getIterations() * config.getTestTypes().size();
+            if (config.getVerbosity() > 0 && System.console() != null) {
+                startProgressReporting();
+            }
+            int iterationCount = 0;
             for (BenchmarkConfig.TestType type : config.getTestTypes()) {
                 for (int i = 0; i < config.getIterations(); i++) {
+                    currentTestType = type;
+                    currentIteration = iterationCount + 1;
+                    progressBytesProcessed.set(0);
                     List<BenchmarkResult> iterationResults = runMultiThreaded(runId++, type);
                     results.addAll(iterationResults);
+                    iterationCount++;
                 }
             }
             return Collections.unmodifiableList(results);
         } finally {
+            stopProgressReporting();
             shutdownExecutors();
             if (!config.isRetainTestFiles()) {
                 paths.cleanupSessionFiles(false);
             }
         }
+    }
+
+    private void startProgressReporting() {
+        progressExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "progress-reporter");
+            t.setDaemon(true);
+            return t;
+        });
+        progressExecutor.scheduleAtFixedRate(this::printProgress, 1, 1, TimeUnit.SECONDS);
+    }
+
+    private void stopProgressReporting() {
+        if (progressExecutor != null && !progressExecutor.isShutdown()) {
+            progressExecutor.shutdownNow();
+        }
+        System.out.println();
+    }
+
+    private void printProgress() {
+        long totalForIteration = (long) config.getTestTypes().size() * config.getIterations();
+        double overallPercent = (double) currentIteration / totalForIteration * 100;
+        long bytes = progressBytesProcessed.get();
+        double elapsed = Duration.between(progressStartTime, Instant.now()).toMillis() / 1000.0;
+        double throughputMBps = elapsed > 0 ? (bytes / (1024.0 * 1024.0)) / elapsed : 0;
+        long etaSeconds = throughputMBps > 0
+            ? (long) ((config.getFileSizeBytes() * config.getThreads()
+                * (totalForIteration - currentIteration + 1)
+                - bytes) / (throughputMBps * 1024 * 1024))
+            : 0;
+
+        int barLen = 20;
+        int filled = Math.min(barLen, Math.max(0, (int) (overallPercent / 100 * barLen)));
+        String progressBar = "=".repeat(filled) + " ".repeat(barLen - filled);
+
+        System.out.printf("\r[%s] %3.0f%% | %s | %8.0f MB/s | ETA: %2dm %02ds | Iteration %d/%d",
+            progressBar, overallPercent, currentTestType, throughputMBps,
+            etaSeconds / 60, etaSeconds % 60, currentIteration, totalIterations);
     }
 
     private List<BenchmarkResult> runMultiThreaded(int runId, BenchmarkConfig.TestType type)
@@ -181,60 +237,135 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
     private BenchmarkResult runSingleThreadSync(Path file, int runId, BenchmarkConfig.TestType type, int threadId)
             throws IOException {
 
+        long fileSize = config.getFileSizeBytes();
+        boolean isWrite = (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE);
+        boolean isRandom = (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE);
+        boolean isMixed = (type == BenchmarkConfig.TestType.MIXED_RW);
+        boolean isReadOnly = !isWrite && !isMixed;
+
         ByteBuffer buffer = bufferPool.get();
         Random rng = getThreadRng(threadId);
+        Histogram histogram = new Histogram(3600000000000L, 3);
         Instant start = Instant.now();
         long totalOps = 0;
         long bytesProcessed = 0;
-        long fileSize = config.getFileSizeBytes();
+        long bytesRead = 0;
+        long bytesWritten = 0;
 
         try (FileChannel channel = FileChannel.open(file,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE)) {
 
-            if (config.isPreallocateFiles() &&
-                (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE)) {
+            if (config.isPreallocateFiles() && (isWrite || isMixed)) {
                 channel.truncate(fileSize);
             }
 
-            while (bytesProcessed < fileSize) {
-                queueSemaphore.acquireUninterruptibly();
-                try {
-                    int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
+            if (isMixed) {
+                int readPercent = config.getMixedReadPercent();
+                int readThreshold = (int) (readPercent * 0.01 * Integer.MAX_VALUE);
+                int blockSize = config.getBlockSizeBytes();
 
-                    buffer.clear();
-                    buffer.limit(bytesToProcess);
+                while (bytesProcessed < fileSize) {
+                    int bytesToProcess = (int) Math.min(blockSize, fileSize - bytesProcessed);
 
-                    if (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE) {
-                        byte[] temp = new byte[bytesToProcess];
+                    queueSemaphore.acquireUninterruptibly();
+                    try {
+                        long randomPos = ThreadLocalRandom.current().nextLong(0, Math.max(1, fileSize - bytesToProcess));
+                        channel.position(randomPos);
+
+                        long startNs = System.nanoTime();
+                        boolean doRead = rng.nextInt(Integer.MAX_VALUE) < readThreshold;
+
+                        if (doRead) {
+                            buffer.clear();
+                            buffer.limit(bytesToProcess);
+                            int read = channel.read(buffer);
+                            if (read == -1) break;
+                            bytesRead += read;
+                        } else {
+                            byte[] temp = new byte[bytesToProcess];
+                            rng.nextBytes(temp);
+                            buffer.clear();
+                            buffer.put(temp);
+                            buffer.flip();
+                            int written = channel.write(buffer);
+                            bytesWritten += written;
+                        }
+
+                        long endNs = System.nanoTime();
+                        histogram.recordValue(endNs - startNs);
+                        bytesProcessed += bytesToProcess;
+                        totalOps++;
+
+                        if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 &&
+                            totalOps % config.getSyncEveryNBlocks() == 0) {
+                            channel.force(false);
+                        }
+                    } finally {
+                        queueSemaphore.release();
+                    }
+                    progressBytesProcessed.addAndGet(bytesToProcess);
+                }
+            } else {
+                if (isReadOnly) {
+                    channel.truncate(fileSize);
+                    long prefillWritten = 0;
+                    while (prefillWritten < fileSize) {
+                        int toWrite = (int) Math.min(config.getBlockSizeBytes(), fileSize - prefillWritten);
+                        byte[] temp = new byte[toWrite];
                         rng.nextBytes(temp);
+                        buffer.clear();
                         buffer.put(temp);
                         buffer.flip();
-                        int written = channel.write(buffer);
-                        bytesProcessed += written;
-                    } else {
-                        int read = channel.read(buffer);
-                        if (read == -1) {
-                            break;
+                        prefillWritten += channel.write(buffer);
+                    }
+                    channel.position(0);
+                    start = Instant.now();
+                }
+
+                while (bytesProcessed < fileSize) {
+                    int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
+
+                    queueSemaphore.acquireUninterruptibly();
+                    try {
+                        long startNs = System.nanoTime();
+
+                        if (isWrite) {
+                            byte[] temp = new byte[bytesToProcess];
+                            rng.nextBytes(temp);
+                            buffer.clear();
+                            buffer.put(temp);
+                            buffer.flip();
+                            int written = channel.write(buffer);
+                            bytesWritten += written;
+                            bytesProcessed += written;
+                        } else {
+                            buffer.clear();
+                            buffer.limit(bytesToProcess);
+                            int read = channel.read(buffer);
+                            if (read == -1) break;
+                            bytesRead += read;
+                            bytesProcessed += read;
                         }
-                        bytesProcessed += read;
-                    }
 
-                    if (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE) {
-                        long maxPos = Math.max(0, fileSize - bytesToProcess);
-                        long pos = ThreadLocalRandom.current().nextLong(0, maxPos + 1);
-                        channel.position(pos);
-                    }
+                        if (isRandom && fileSize > 0) {
+                            long maxPos = Math.max(0, fileSize - bytesToProcess);
+                            channel.position(ThreadLocalRandom.current().nextLong(0, maxPos + 1));
+                        }
 
-                    totalOps++;
+                        long endNs = System.nanoTime();
+                        histogram.recordValue(endNs - startNs);
+                        totalOps++;
 
-                    if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 &&
-                        totalOps % config.getSyncEveryNBlocks() == 0) {
-                        channel.force(false);
+                        if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 &&
+                            totalOps % config.getSyncEveryNBlocks() == 0) {
+                            channel.force(false);
+                        }
+                    } finally {
+                        queueSemaphore.release();
                     }
-                } finally {
-                    queueSemaphore.release();
+                    progressBytesProcessed.addAndGet(bytesToProcess);
                 }
             }
 
@@ -244,18 +375,25 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
         }
 
         Instant end = Instant.now();
-        return calculateResult(runId, threadId, type, fileSize, start, end, totalOps);
+        return calculateResult(runId, threadId, type, bytesProcessed, bytesRead, bytesWritten,
+                start, end, totalOps, histogram);
     }
 
     private BenchmarkResult runSingleThreadAsync(Path file, int runId, BenchmarkConfig.TestType type, int threadId)
             throws IOException {
 
+        long fileSize = config.getFileSizeBytes();
+        boolean isWrite = (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE);
+        boolean isRandom = (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE);
+        boolean isReadOnly = !isWrite;
+
         ByteBuffer buffer = bufferPool.get();
         Random rng = getThreadRng(threadId);
-        long fileSize = config.getFileSizeBytes();
+        Histogram histogram = new Histogram(3600000000000L, 3);
         long bytesProcessed = 0;
         long totalOps = 0;
-        boolean isWrite = (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE);
+        long bytesRead = 0;
+        long bytesWritten = 0;
 
         try (AsynchronousFileChannel channel = AsynchronousFileChannel.open(file,
                 StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
@@ -264,6 +402,24 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
                 try (FileChannel fc = FileChannel.open(file,
                         StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
                     fc.truncate(fileSize);
+                }
+            }
+
+            if (isReadOnly) {
+                try (FileChannel fc = FileChannel.open(file,
+                        StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                    fc.truncate(fileSize);
+                    long prefillWritten = 0;
+                    ByteBuffer fillBuf = ByteBuffer.allocate(config.getBlockSizeBytes());
+                    while (prefillWritten < fileSize) {
+                        int toWrite = (int) Math.min(config.getBlockSizeBytes(), fileSize - prefillWritten);
+                        byte[] temp = new byte[toWrite];
+                        rng.nextBytes(temp);
+                        fillBuf.clear();
+                        fillBuf.put(temp);
+                        fillBuf.flip();
+                        prefillWritten += fc.write(fillBuf);
+                    }
                 }
             }
 
@@ -278,6 +434,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
                 final CountDownLatch opLatch = new CountDownLatch(1);
                 final long[] resultHolder = new long[1];
                 final boolean[] failed = new boolean[1];
+                final long[] startNsRef = {System.nanoTime()};
 
                 if (isWrite) {
                     byte[] temp = new byte[bytesToProcess];
@@ -288,6 +445,10 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
                     channel.write(buffer, channel.size(), null, new CompletionHandler<Integer, Void>() {
                         @Override
                         public void completed(Integer written, Void attachment) {
+                            long latencyNs = System.nanoTime() - startNsRef[0];
+                            synchronized (histogram) {
+                                histogram.recordValue(latencyNs);
+                            }
                             resultHolder[0] = written;
                             opLatch.countDown();
                         }
@@ -301,6 +462,10 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
                     channel.read(buffer, bytesProcessed, null, new CompletionHandler<Integer, Void>() {
                         @Override
                         public void completed(Integer read, Void attachment) {
+                            long latencyNs = System.nanoTime() - startNsRef[0];
+                            synchronized (histogram) {
+                                histogram.recordValue(latencyNs);
+                            }
                             resultHolder[0] = read >= 0 ? read : 0;
                             opLatch.countDown();
                         }
@@ -326,14 +491,21 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
                 }
 
                 bytesProcessed += resultHolder[0];
+                if (isWrite) {
+                    bytesWritten += resultHolder[0];
+                } else {
+                    bytesRead += resultHolder[0];
+                }
                 totalOps++;
 
-                if (isWrite && type == BenchmarkConfig.TestType.RAND_WRITE) {
+                if (isRandom && fileSize > 0) {
                     long maxPos = Math.max(0, fileSize - bytesToProcess);
-                    long pos = ThreadLocalRandom.current().nextLong(0, maxPos + 1);
+                    // position for next random operation (for write, use channel.size as before)
+                    // this is handled implicitly for async by next operation's position
                 }
 
                 queueSemaphore.release();
+                progressBytesProcessed.addAndGet(resultHolder[0]);
 
                 if (resultHolder[0] == 0) {
                     break;
@@ -341,12 +513,14 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
             }
 
             Instant end = Instant.now();
-            return calculateResult(runId, threadId, type, bytesProcessed, start, end, totalOps);
+            return calculateResult(runId, threadId, type, bytesProcessed, bytesRead, bytesWritten,
+                    start, end, totalOps, histogram);
         }
     }
 
     private BenchmarkResult calculateResult(int runId, int threadId, BenchmarkConfig.TestType type,
-            long bytesProcessed, Instant start, Instant end, long totalOps) {
+            long bytesProcessed, long bytesRead, long bytesWritten,
+            Instant start, Instant end, long totalOps, Histogram histogram) {
 
         Duration elapsed = Duration.between(start, end);
         long elapsedNanos = elapsed.toNanos();
@@ -357,12 +531,20 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
         double avgLatencyNs = (double) elapsedNanos / totalOps;
         double iops = totalOps / elapsedSeconds;
 
-        String rid = String.format("run-%03d-thread-%02d", runId, threadId);
-        BenchmarkResult result = new BenchmarkResult(rid, type.name(), bytesProcessed, elapsed,
-                elapsedNanos, throughputMBps, avgLatencyMs, avgLatencyNs, iops, end);
+        double p50 = histogram.getValueAtPercentile(50.0);
+        double p95 = histogram.getValueAtPercentile(95.0);
+        double p99 = histogram.getValueAtPercentile(99.0);
+        double p999 = histogram.getValueAtPercentile(99.9);
+        long maxLatencyNs = histogram.getMaxValue();
 
-        logger.debug("Run {} completed: type={}, throughput={:.2f} MB/s, latency={:.2f} ms",
-                rid, type, throughputMBps, avgLatencyMs);
+        String rid = String.format("run-%03d-thread-%02d", runId, threadId);
+        String typeName = type != null ? type.name() : "";
+        BenchmarkResult result = new BenchmarkResult(rid, typeName, bytesProcessed, elapsed,
+                elapsedNanos, throughputMBps, avgLatencyMs, avgLatencyNs, iops, end,
+                p50, p95, p99, p999, maxLatencyNs);
+
+        logger.debug("Run {} completed: type={}, throughput={:.2f} MB/s, latency={:.2f} ms, p99={:.0f} ns",
+                rid, type, throughputMBps, avgLatencyMs, p99);
         return result;
     }
 

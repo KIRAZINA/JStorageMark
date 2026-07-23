@@ -401,4 +401,46 @@ class BenchmarkConfigTest {
         assertThat(str).contains("fileSizeBytes");
         assertThat(str).contains("sessionId");
     }
+
+    @Test
+    @DisplayName("Builder toString should include builder fields")
+    void builderToStringShouldIncludeFields() {
+        BenchmarkConfig.Builder builder = new BenchmarkConfig.Builder()
+                .testDirectory(Path.of("./testdir"))
+                .addTestType(BenchmarkConfig.TestType.SEQ_READ);
+
+        String str = builder.toString();
+        assertThat(str).contains("BenchmarkConfig.Builder");
+        assertThat(str).contains("testDirectory");
+        assertThat(str).contains("testdir");
+        assertThat(str).contains("fileSizeBytes");
+        assertThat(str).contains("blockSizeBytes");
+        assertThat(str).contains("threads");
+        assertThat(str).contains("randomSeed");
+        assertThat(str).contains("mixedReadPercent");
+    }
+
+    @Test
+    @DisplayName("Default sessionId should be generated when not set")
+    void defaultSessionIdShouldBeGenerated() {
+        BenchmarkConfig config = new BenchmarkConfig.Builder()
+                .testDirectory(Path.of("./testdir"))
+                .addTestType(BenchmarkConfig.TestType.SEQ_READ)
+                .build();
+
+        assertThat(config.getSessionId()).startsWith("jsm-");
+        assertThat(config.getSessionId().length()).isEqualTo(16); // "jsm-" + 12 chars
+    }
+
+    @Test
+    @DisplayName("Custom sessionId should be preserved")
+    void customSessionIdShouldBePreserved() {
+        BenchmarkConfig config = new BenchmarkConfig.Builder()
+                .testDirectory(Path.of("./testdir"))
+                .addTestType(BenchmarkConfig.TestType.SEQ_READ)
+                .sessionId("my-custom-session")
+                .build();
+
+        assertThat(config.getSessionId()).isEqualTo("my-custom-session");
+    }
 }

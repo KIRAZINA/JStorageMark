@@ -12,4 +12,6 @@ public interface IReportGenerator {
                    SystemInfoSnapshot systemInfo) throws IOException;
     void writeHtml(List<BenchmarkResult> results, List<MetricsSnapshot> metrics,
                    SystemInfoSnapshot systemInfo) throws IOException;
+    void writeSweepReport(List<BenchmarkResult> results, List<Integer> blockSizes) throws IOException;
+    void writeDiffReport(List<BenchmarkResult> baseline, List<BenchmarkResult> current) throws IOException;
 }

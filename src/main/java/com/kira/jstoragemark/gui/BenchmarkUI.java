@@ -453,7 +453,23 @@ public class BenchmarkUI {
 
     private static long validateFileSize(String sizeStr) throws IllegalArgumentException {
         try {
-            long size = Long.parseLong(sizeStr.trim());
+            String input = sizeStr.trim().toUpperCase(Locale.ROOT);
+            long multiplier = 1L;
+            String numPart = input;
+            if (input.endsWith("T")) {
+                multiplier = 1024L * 1024 * 1024 * 1024;
+                numPart = input.substring(0, input.length() - 1);
+            } else if (input.endsWith("G")) {
+                multiplier = 1024L * 1024 * 1024;
+                numPart = input.substring(0, input.length() - 1);
+            } else if (input.endsWith("M")) {
+                multiplier = 1024L * 1024;
+                numPart = input.substring(0, input.length() - 1);
+            } else if (input.endsWith("K")) {
+                multiplier = 1024L;
+                numPart = input.substring(0, input.length() - 1);
+            }
+            long size = Long.parseLong(numPart.trim()) * multiplier;
             long minBytes = 1L * 1024 * 1024 * 1024;
             long maxBytes = 10L * 1024 * 1024 * 1024;
             if (size < minBytes || size > maxBytes) {

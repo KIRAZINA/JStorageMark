@@ -13,5 +13,10 @@ public record BenchmarkResult(
     double avgLatencyMs,
     double avgLatencyNs,
     double iops,
-    Instant timestamp
+    Instant timestamp,
+    double p50LatencyNs,
+    double p95LatencyNs,
+    double p99LatencyNs,
+    double p999LatencyNs,
+    long maxLatencyNs
 ) {}

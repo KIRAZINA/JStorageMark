@@ -24,9 +24,6 @@ import com.kira.jstoragemark.fs.BenchmarkPaths;
 import com.kira.jstoragemark.metrics.MetricsSnapshot;
 import com.kira.jstoragemark.result.BenchmarkResult;
 
-/**
- * Tests for ReportGenerator output formats.
- */
 class ReportGeneratorTest {
 
     @TempDir
@@ -65,11 +62,14 @@ class ReportGeneratorTest {
         Duration d3 = Duration.ofMillis(1500);
         return Arrays.asList(
                 new BenchmarkResult("run-001-thread-00", "SEQ_READ", 1024L * 1024 * 1024,
-                        d1, d1.toNanos(), 100.5, 10.2, 10.2 * 1_000_000.0, 1000.0, now),
+                        d1, d1.toNanos(), 100.5, 10.2, 10.2 * 1_000_000.0, 1000.0, now,
+                        500.0, 2000.0, 5000.0, 10000.0, 50000L),
                 new BenchmarkResult("run-002-thread-00", "SEQ_WRITE", 1024L * 1024 * 1024,
-                        d2, d2.toNanos(), 50.25, 20.5, 20.5 * 1_000_000.0, 500.0, now),
+                        d2, d2.toNanos(), 50.25, 20.5, 20.5 * 1_000_000.0, 500.0, now,
+                        1000.0, 4000.0, 10000.0, 20000.0, 100000L),
                 new BenchmarkResult("run-003-thread-00", "RAND_READ", 1024L * 1024 * 1024,
-                        d3, d3.toNanos(), 75.0, 15.0, 15.0 * 1_000_000.0, 750.0, now)
+                        d3, d3.toNanos(), 75.0, 15.0, 15.0 * 1_000_000.0, 750.0, now,
+                        750.0, 3000.0, 7500.0, 15000.0, 75000L)
         );
     }
 
@@ -97,6 +97,8 @@ class ReportGeneratorTest {
                 .contains("RunId")
                 .contains("TestType")
                 .contains("ThroughputMBps")
+                .contains("P50LatencyNs")
+                .contains("P99LatencyNs")
                 .contains("SEQ_READ")
                 .contains("SEQ_WRITE")
                 .contains("RAND_READ");
@@ -123,7 +125,6 @@ class ReportGeneratorTest {
 
         Path csvPath = paths.reportFilePath("csv");
         String content = Files.readString(csvPath);
-        // Check for decimal point (not comma)
         assertThat(content).contains("100.50").contains("50.25");
     }
 
@@ -135,13 +136,12 @@ class ReportGeneratorTest {
         Path csvPath = paths.reportFilePath("csv");
         assertThat(csvPath).exists();
         List<String> lines = Files.readAllLines(csvPath);
-        assertThat(lines).hasSize(1); // Only header
+        assertThat(lines).hasSize(1);
     }
 
     @Test
     @DisplayName("Write CSV should throw on IO error")
     void writeCsvShouldThrowOnIoError() {
-        // Create a read-only directory to cause IO error
         ReportGenerator invalidGenerator = new ReportGenerator(
                 new BenchmarkConfig.Builder()
                         .testDirectory(Path.of("/nonexistent/path"))
@@ -192,6 +192,9 @@ class ReportGeneratorTest {
         assertThat(firstResult.has("throughputMBps")).isTrue();
         assertThat(firstResult.has("avgLatencyMs")).isTrue();
         assertThat(firstResult.has("iops")).isTrue();
+        assertThat(firstResult.has("p50LatencyNs")).isTrue();
+        assertThat(firstResult.has("p99LatencyNs")).isTrue();
+        assertThat(firstResult.has("maxLatencyNs")).isTrue();
     }
 
     @Test
@@ -222,8 +225,8 @@ class ReportGeneratorTest {
         Path jsonPath = paths.reportFilePath("json");
         String content = Files.readString(jsonPath);
 
-        assertThat(content).contains("  "); // Contains indentation
-        assertThat(content).contains("\n"); // Contains newlines
+        assertThat(content).contains("  ");
+        assertThat(content).contains("\n");
     }
 
     @Test
@@ -244,7 +247,6 @@ class ReportGeneratorTest {
     @Test
     @DisplayName("Write HTML should create valid HTML file when HTML format enabled")
     void writeHtmlShouldCreateValidFile() throws IOException {
-        // Create config with HTML format
         BenchmarkConfig htmlConfig = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
                 .addTestType(BenchmarkConfig.TestType.SEQ_READ)
@@ -299,10 +301,10 @@ class ReportGeneratorTest {
     @Test
     @DisplayName("Write HTML should escape special characters")
     void writeHtmlShouldEscapeSpecialCharacters() throws IOException {
-        // Create result with special HTML characters
         BenchmarkResult specialResult = new BenchmarkResult(
                 "run-001-thread-00", "<script>alert('xss')</script>", 1024L,
-                Duration.ofMillis(100), Duration.ofMillis(100).toNanos(), 100.0, 10.0, 10.0 * 1_000_000.0, 1000.0, Instant.now()
+                Duration.ofMillis(100), Duration.ofMillis(100).toNanos(), 100.0, 10.0, 10.0 * 1_000_000.0, 1000.0,
+                Instant.now(), 0.0, 0.0, 0.0, 0.0, 0L
         );
 
         BenchmarkConfig htmlConfig = new BenchmarkConfig.Builder()
@@ -322,7 +324,7 @@ class ReportGeneratorTest {
     }
 
     @Test
-    @DisplayName("Write HTML should include results table")
+    @DisplayName("Write HTML should include results table with percentile columns")
     void writeHtmlShouldIncludeResultsTable() throws IOException {
         BenchmarkConfig htmlConfig = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
@@ -341,7 +343,10 @@ class ReportGeneratorTest {
                 .contains("</table>")
                 .contains("Throughput (MB/s)")
                 .contains("Latency (ms)")
-                .contains("IOPS");
+                .contains("IOPS")
+                .contains("p50 (ns)")
+                .contains("p99 (ns)")
+                .contains("p99.9 (ns)");
     }
 
     @Test
@@ -389,8 +394,6 @@ class ReportGeneratorTest {
     @Test
     @DisplayName("Write HTML should escape session ID")
     void writeHtmlShouldEscapeSessionId() throws IOException {
-        // This is harder to test without modifying the session ID generation
-        // but we verify the method uses escapeHtml4
         BenchmarkConfig htmlConfig = new BenchmarkConfig.Builder()
                 .testDirectory(tempDir)
                 .addTestType(BenchmarkConfig.TestType.SEQ_READ)
@@ -403,5 +406,56 @@ class ReportGeneratorTest {
 
         Path htmlPath = htmlPaths.reportFilePath("html");
         assertThat(htmlPath).exists();
+    }
+
+    // ==================== Sweep Report Tests ====================
+
+    @Test
+    @DisplayName("Write sweep report should create valid CSV")
+    void writeSweepReportShouldCreateValidCsv() throws IOException {
+        List<Integer> blockSizes = Arrays.asList(4096, 8192, 16384);
+        generator.writeSweepReport(createSampleResults(), blockSizes);
+
+        Path csvPath = paths.reportFilePath("sweep.csv");
+        assertThat(csvPath).exists();
+        String content = Files.readString(csvPath);
+        assertThat(content)
+                .contains("BlockSize")
+                .contains("ThroughputMBps")
+                .contains("P99LatencyNs");
+    }
+
+    // ==================== Diff Report Tests ====================
+
+    @Test
+    @DisplayName("Write diff report should create valid HTML")
+    void writeDiffReportShouldCreateValidHtml() throws IOException {
+        List<BenchmarkResult> baseline = createSampleResults();
+        List<BenchmarkResult> current = Arrays.asList(
+                new BenchmarkResult("run-001-thread-00", "SEQ_READ", 1024L * 1024 * 1024,
+                        Duration.ofMillis(900), Duration.ofMillis(900).toNanos(),
+                        110.0, 9.0, 9.0 * 1_000_000.0, 1100.0, Instant.now(),
+                        450.0, 1800.0, 4500.0, 9000.0, 45000L),
+                new BenchmarkResult("run-002-thread-00", "SEQ_WRITE", 1024L * 1024 * 1024,
+                        Duration.ofMillis(1800), Duration.ofMillis(1800).toNanos(),
+                        55.0, 18.0, 18.0 * 1_000_000.0, 550.0, Instant.now(),
+                        900.0, 3600.0, 9000.0, 18000.0, 90000L),
+                new BenchmarkResult("run-003-thread-00", "RAND_READ", 1024L * 1024 * 1024,
+                        Duration.ofMillis(1400), Duration.ofMillis(1400).toNanos(),
+                        80.0, 14.0, 14.0 * 1_000_000.0, 800.0, Instant.now(),
+                        700.0, 2800.0, 7000.0, 14000.0, 70000L)
+        );
+
+        generator.writeDiffReport(baseline, current);
+
+        Path htmlPath = paths.reportFilePath("diff.html");
+        assertThat(htmlPath).exists();
+        String content = Files.readString(htmlPath);
+        assertThat(content)
+                .contains("Benchmark Comparison")
+                .contains("<table>")
+                .contains("improvement")
+                .contains("regression")
+                .contains("Throughput (MB/s)");
     }
 }

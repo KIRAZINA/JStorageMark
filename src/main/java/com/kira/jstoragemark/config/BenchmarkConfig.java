@@ -41,7 +41,8 @@ public final class BenchmarkConfig {
         SEQ_READ,
         SEQ_WRITE,
         RAND_READ,
-        RAND_WRITE
+        RAND_WRITE,
+        MIXED_RW
     }
 
     /** Reporting formats */
@@ -66,6 +67,7 @@ public final class BenchmarkConfig {
     private final IoMode ioMode;                   // SYNC/ASYNC
     private final int queueDepth;                  // Simulated concurrency via thread pool/semaphore
     private final Long randomSeed;                 // Optional fixed seed for reproducibility
+    private final int mixedReadPercent;            // For MIXED_RW only: percentage of reads (0-100)
 
     // ---- Safety / device handling ------------------------------------------
 
@@ -110,6 +112,7 @@ public final class BenchmarkConfig {
         this.ioMode = Objects.requireNonNull(b.ioMode, "ioMode");
         this.queueDepth = b.queueDepth;
         this.randomSeed = b.randomSeed;
+        this.mixedReadPercent = b.mixedReadPercent;
 
         this.allowRawDeviceAccess = b.allowRawDeviceAccess;
         this.retainTestFiles = b.retainTestFiles;
@@ -175,6 +178,11 @@ public final class BenchmarkConfig {
             throw new IllegalArgumentException("queueDepth must be >= 1 and <= threads * 2.");
         }
 
+        // Mixed read percent: 0-100 (only relevant for MIXED_RW)
+        if (mixedReadPercent < 0 || mixedReadPercent > 100) {
+            throw new IllegalArgumentException("mixedReadPercent must be between 0 and 100.");
+        }
+
         // Verbosity: 0–2
         if (verbosity < 0 || verbosity > 2) {
             throw new IllegalArgumentException("verbosity must be 0 (quiet), 1 (info), or 2 (debug).");
@@ -213,6 +221,7 @@ public final class BenchmarkConfig {
     public IoMode getIoMode() { return ioMode; }
     public int getQueueDepth() { return queueDepth; }
     public Optional<Long> getRandomSeed() { return Optional.ofNullable(randomSeed); }
+    public int getMixedReadPercent() { return mixedReadPercent; }
     public boolean isAllowRawDeviceAccess() { return allowRawDeviceAccess; }
     public boolean isRetainTestFiles() { return retainTestFiles; }
     public boolean isForceSync() { return forceSync; }
@@ -231,7 +240,8 @@ public final class BenchmarkConfig {
 
     /** Convenience: true if random workloads selected. */
     public boolean hasRandomWorkloads() {
-        return testTypes.contains(TestType.RAND_READ) || testTypes.contains(TestType.RAND_WRITE);
+        return testTypes.contains(TestType.RAND_READ) || testTypes.contains(TestType.RAND_WRITE)
+            || testTypes.contains(TestType.MIXED_RW);
     }
 
     /** Convenience: true if sequential workloads selected. */
@@ -260,6 +270,7 @@ public final class BenchmarkConfig {
         private IoMode ioMode = IoMode.SYNC;
         private int queueDepth = 8;
         private Long randomSeed = null;
+        private int mixedReadPercent = 70; // default 70% reads for MIXED_RW
 
         private boolean allowRawDeviceAccess = false;
         private boolean retainTestFiles = false;
@@ -305,6 +316,14 @@ public final class BenchmarkConfig {
         public Builder queueDepth(int qd) { this.queueDepth = qd; return this; }
         public Builder randomSeed(Long seed) { this.randomSeed = seed; return this; }
 
+        public Builder mixedReadPercent(int percent) {
+            if (percent < 0 || percent > 100) {
+                throw new IllegalArgumentException("mixedReadPercent must be 0-100");
+            }
+            this.mixedReadPercent = percent;
+            return this;
+        }
+
         public Builder allowRawDeviceAccess(boolean allow) { this.allowRawDeviceAccess = allow; return this; }
         public Builder retainTestFiles(boolean retain) { this.retainTestFiles = retain; return this; }
         public Builder forceSync(boolean force) { this.forceSync = force; return this; }
@@ -343,8 +362,9 @@ public final class BenchmarkConfig {
                     ", warmupIterations=" + warmupIterations +
                     ", ioMode=" + ioMode +
                     ", queueDepth=" + queueDepth +
-                    ", randomSeed=" + randomSeed +
-                    ", retainTestFiles=" + retainTestFiles +
+        ", randomSeed=" + randomSeed +
+                ", mixedReadPercent=" + mixedReadPercent +
+                ", retainTestFiles=" + retainTestFiles +
                     ", forceSync=" + forceSync +
                     '}';
         }
@@ -372,6 +392,7 @@ public final class BenchmarkConfig {
                 ", ioMode=" + ioMode +
                 ", queueDepth=" + queueDepth +
                 ", randomSeed=" + randomSeed +
+                ", mixedReadPercent=" + mixedReadPercent +
                 ", allowRawDeviceAccess=" + allowRawDeviceAccess +
                 ", retainTestFiles=" + retainTestFiles +
                 ", verbosity=" + verbosity +
