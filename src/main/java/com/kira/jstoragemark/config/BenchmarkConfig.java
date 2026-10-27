@@ -236,7 +236,7 @@ public final class BenchmarkConfig {
     // ---- Accessors ----------------------------------------------------------
 
     public Path getTestDirectory() { return testDirectory; }
-    public Set<TestType> getTestTypes() { return testTypes; }
+    public Set<TestType> getTestTypes() { return new LinkedHashSet<>(testTypes); }
     public long getFileSizeBytes() { return fileSizeBytes; }
     public int getBlockSizeBytes() { return blockSizeBytes; }
     public int getThreads() { return threads; }
@@ -255,7 +255,7 @@ public final class BenchmarkConfig {
     public int getVerbosity() { return verbosity; }
     public boolean isCollectSystemMetrics() { return collectSystemMetrics; }
     public Duration getMetricsPollInterval() { return metricsPollInterval; }
-    public Set<ReportFormat> getReportFormats() { return reportFormats; }
+    public Set<ReportFormat> getReportFormats() { return new LinkedHashSet<>(reportFormats); }
     public boolean isEmbedCharts() { return embedCharts; }
     public WorkloadProfile getWorkloadProfile() { return workloadProfile; }
     public WorkloadProfile getProfile() { return workloadProfile; }

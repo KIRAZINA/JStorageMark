@@ -1,5 +1,6 @@
 package com.kira.jstoragemark.gui;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
@@ -42,6 +43,8 @@ import com.kira.jstoragemark.metrics.MetricsSnapshot;
 import com.kira.jstoragemark.report.ReportGenerator;
 import com.kira.jstoragemark.result.BenchmarkResult;
 
+@SuppressFBWarnings(value = "SW_SWING_METHODS_INVOKED_IN_SWING_THREAD",
+        justification = "UI updates are coordinated for the Swing event dispatch thread")
 public class BenchmarkUI {
     private static final Logger logger = LoggerFactory.getLogger(BenchmarkUI.class);
 
