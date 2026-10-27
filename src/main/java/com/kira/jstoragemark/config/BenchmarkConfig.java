@@ -3,6 +3,7 @@ package com.kira.jstoragemark.config;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -236,7 +237,8 @@ public final class BenchmarkConfig {
     // ---- Accessors ----------------------------------------------------------
 
     public Path getTestDirectory() { return testDirectory; }
-    public Set<TestType> getTestTypes() { return new LinkedHashSet<>(testTypes); }
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "Returned set is unmodifiable")
+    public Set<TestType> getTestTypes() { return Collections.unmodifiableSet(testTypes); }
     public long getFileSizeBytes() { return fileSizeBytes; }
     public int getBlockSizeBytes() { return blockSizeBytes; }
     public int getThreads() { return threads; }
@@ -255,7 +257,8 @@ public final class BenchmarkConfig {
     public int getVerbosity() { return verbosity; }
     public boolean isCollectSystemMetrics() { return collectSystemMetrics; }
     public Duration getMetricsPollInterval() { return metricsPollInterval; }
-    public Set<ReportFormat> getReportFormats() { return new LinkedHashSet<>(reportFormats); }
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "Returned set is unmodifiable")
+    public Set<ReportFormat> getReportFormats() { return Collections.unmodifiableSet(reportFormats); }
     public boolean isEmbedCharts() { return embedCharts; }
     public WorkloadProfile getWorkloadProfile() { return workloadProfile; }
     public WorkloadProfile getProfile() { return workloadProfile; }
