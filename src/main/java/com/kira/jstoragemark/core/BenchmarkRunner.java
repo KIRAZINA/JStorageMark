@@ -2,18 +2,11 @@ package com.kira.jstoragemark.core;
 
 import com.kira.jstoragemark.config.BenchmarkConfig;
 import com.kira.jstoragemark.fs.BenchmarkPaths;
-import com.kira.jstoragemark.report.SystemInfoSnapshot;
-import com.kira.jstoragemark.result.BenchmarkResult;
-import com.kira.jstoragemark.metrics.MetricsSnapshot;
 import com.kira.jstoragemark.metrics.IMetricsCollector;
 import com.kira.jstoragemark.metrics.MetricsCollector;
-import org.HdrHistogram.Histogram;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import oshi.SystemInfo;
-import oshi.hardware.CentralProcessor;
-import oshi.hardware.HardwareAbstractionLayer;
-
+import com.kira.jstoragemark.metrics.MetricsSnapshot;
+import com.kira.jstoragemark.report.SystemInfoSnapshot;
+import com.kira.jstoragemark.result.BenchmarkResult;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousFileChannel;
@@ -23,557 +16,946 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Random;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Phaser;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import org.HdrHistogram.Histogram;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import oshi.SystemInfo;
+import oshi.hardware.CentralProcessor;
+import oshi.hardware.HardwareAbstractionLayer;
 
+/**
+ * Executes storage benchmark workloads against files inside a dedicated test directory.
+ *
+ * <p>Supports synchronous and asynchronous I/O modes, sequential and random access patterns, and
+ * optional deterministic seeding so that a fixed seed reproduces the exact operation position
+ * sequence.
+ */
 public final class BenchmarkRunner implements IBenchmarkRunner {
-    private static final Logger logger = LoggerFactory.getLogger(BenchmarkRunner.class);
 
-    private final BenchmarkConfig config;
-    private final BenchmarkPaths paths;
-    private final IMetricsCollector metricsCollector;
-    private final ExecutorService ioExecutor;
+  private static final Logger logger = LoggerFactory.getLogger(BenchmarkRunner.class);
 
-    private final List<BenchmarkResult> results = Collections.synchronizedList(new ArrayList<>());
+  /** Multiplier used to derive an independent, deterministic seed per worker thread. */
+  private static final long THREAD_SEED_MIX = 0x9E3779B97F4A7C15L;
 
-    private final ThreadLocal<ByteBuffer> bufferPool;
-    private final Map<Integer, Random> threadRngMap;
-    private final long baseSeed;
-    private final boolean useFixedSeed;
+  /** Opens the asynchronous channel used for ASYNC mode; replaceable in tests. */
+  @FunctionalInterface
+  interface AsyncChannelFactory {
+    AsynchronousFileChannel open(Path file) throws IOException;
+  }
 
-    private final Semaphore queueSemaphore;
-    private final SystemInfoSnapshot systemInfo;
+  private static final AsyncChannelFactory DEFAULT_ASYNC_CHANNEL_FACTORY =
+      file ->
+          AsynchronousFileChannel.open(
+              file,
+              StandardOpenOption.CREATE,
+              StandardOpenOption.READ,
+              StandardOpenOption.WRITE);
 
-    private final AtomicLong progressBytesProcessed = new AtomicLong(0);
-    private final Instant progressStartTime = Instant.now();
-    private volatile BenchmarkConfig.TestType currentTestType;
-    private volatile int currentIteration;
-    private volatile int totalIterations;
-    private ScheduledExecutorService progressExecutor;
+  private final BenchmarkConfig config;
+  private final BenchmarkPaths paths;
+  private final IMetricsCollector metricsCollector;
+  private final ExecutorService ioExecutor;
+  private final AsyncChannelFactory asyncChannelFactory;
 
-    public BenchmarkRunner(BenchmarkConfig config, BenchmarkPaths paths) {
-        this.config = Objects.requireNonNull(config, "config must not be null");
-        this.paths = Objects.requireNonNull(paths, "paths must not be null");
-        this.metricsCollector = new MetricsCollector(config.getMetricsPollInterval());
-        this.ioExecutor = Executors.newFixedThreadPool(config.getThreads());
+  private final List<BenchmarkResult> results = Collections.synchronizedList(new ArrayList<>());
 
-        this.bufferPool = ThreadLocal.withInitial(() ->
-            config.isUseDirectBuffer()
-                ? ByteBuffer.allocateDirect(config.getBlockSizeBytes())
-                : ByteBuffer.allocate(config.getBlockSizeBytes()));
+  private final ThreadLocal<ByteBuffer> bufferPool;
+  private final long baseSeed;
+  private final boolean useFixedSeed;
 
-        Optional<Long> seedOpt = config.getRandomSeed();
-        this.threadRngMap = new ConcurrentHashMap<>();
-        this.baseSeed = seedOpt.orElse(0L);
-        this.useFixedSeed = seedOpt.isPresent();
+  private final Semaphore queueSemaphore;
+  private final SystemInfoSnapshot systemInfo;
 
-        this.queueSemaphore = new Semaphore(config.getQueueDepth());
-        this.systemInfo = captureSystemInfo();
+  private final AtomicLong progressBytesProcessed = new AtomicLong(0);
+  private final Instant progressStartTime = Instant.now();
+  private volatile BenchmarkConfig.TestType currentTestType;
+  private volatile int currentIteration;
+  private volatile int totalIterations;
+  private ScheduledExecutorService progressExecutor;
 
-        logger.info("BenchmarkRunner initialized with {} threads, directBuffer={}, ioMode={}, queueDepth={}",
-                config.getThreads(), config.isUseDirectBuffer(), config.getIoMode(), config.getQueueDepth());
+  /**
+   * Creates a runner that opens real asynchronous channels.
+   *
+   * @param config benchmark configuration
+   * @param paths test directory helper
+   */
+  public BenchmarkRunner(BenchmarkConfig config, BenchmarkPaths paths) {
+    this(config, paths, DEFAULT_ASYNC_CHANNEL_FACTORY);
+  }
+
+  /**
+   * Creates a runner with an injectable asynchronous channel factory.
+   *
+   * <p>Package-private so tests can observe the exact file position handed to every asynchronous
+   * read and write without touching the public API.
+   *
+   * @param config benchmark configuration
+   * @param paths test directory helper
+   * @param asyncChannelFactory factory used to open the asynchronous channel
+   */
+  BenchmarkRunner(
+      BenchmarkConfig config, BenchmarkPaths paths, AsyncChannelFactory asyncChannelFactory) {
+    this.config = Objects.requireNonNull(config, "config must not be null");
+    this.paths = Objects.requireNonNull(paths, "paths must not be null");
+    this.asyncChannelFactory =
+        Objects.requireNonNull(asyncChannelFactory, "asyncChannelFactory must not be null");
+    this.metricsCollector = new MetricsCollector(config.getMetricsPollInterval());
+    this.ioExecutor = Executors.newFixedThreadPool(config.getThreads());
+
+    this.bufferPool =
+        ThreadLocal.withInitial(
+            () ->
+                config.isUseDirectBuffer()
+                    ? ByteBuffer.allocateDirect(config.getBlockSizeBytes())
+                    : ByteBuffer.allocate(config.getBlockSizeBytes()));
+
+    Optional<Long> seedOpt = config.getRandomSeed();
+    this.baseSeed = seedOpt.orElse(0L);
+    this.useFixedSeed = seedOpt.isPresent();
+
+    this.queueSemaphore = new Semaphore(config.getQueueDepth());
+    this.systemInfo = captureSystemInfo();
+
+    logger.info(
+        "BenchmarkRunner initialized with {} threads, directBuffer={}, ioMode={}, queueDepth={}",
+        config.getThreads(),
+        config.isUseDirectBuffer(),
+        config.getIoMode(),
+        config.getQueueDepth());
+  }
+
+  private static SystemInfoSnapshot captureSystemInfo() {
+    try {
+      SystemInfo si = new SystemInfo();
+      HardwareAbstractionLayer hal = si.getHardware();
+      CentralProcessor cpu = hal.getProcessor();
+      return new SystemInfoSnapshot(
+          System.getProperty("os.name") + " " + System.getProperty("os.version"),
+          System.getProperty("java.version"),
+          cpu.getProcessorIdentifier().getName(),
+          hal.getMemory().getTotal());
+    } catch (Exception e) {
+      logger.warn("Could not capture system info", e);
+      return new SystemInfoSnapshot("unknown", "unknown", "unknown", 0L);
     }
+  }
 
-    private static SystemInfoSnapshot captureSystemInfo() {
-        try {
-            SystemInfo si = new SystemInfo();
-            HardwareAbstractionLayer hal = si.getHardware();
-            CentralProcessor cpu = hal.getProcessor();
-            return new SystemInfoSnapshot(
-                System.getProperty("os.name") + " " + System.getProperty("os.version"),
-                System.getProperty("java.version"),
-                cpu.getProcessorIdentifier().getName(),
-                hal.getMemory().getTotal()
-            );
-        } catch (Exception e) {
-            logger.warn("Could not capture system info", e);
-            return new SystemInfoSnapshot("unknown", "unknown", "unknown", 0L);
+  /**
+   * Returns the captured host information for this session.
+   *
+   * @return immutable system snapshot
+   */
+  public SystemInfoSnapshot getSystemInfo() {
+    return systemInfo;
+  }
+
+  /**
+   * Resolves the file position for a single block operation.
+   *
+   * <p>Sequential workloads advance with the running byte offset. Random workloads draw a block
+   * aligned start position from {@code [0, fileSize - bytesToProcess]} using the supplied
+   * thread-bound generator, so the draw is reproducible when the generator is seeded.
+   *
+   * @param random whether the workload is a random access pattern
+   * @param rng thread-bound generator, consumed only for random workloads
+   * @param fileSize total size of the test file in bytes
+   * @param sequentialOffset running byte offset used by sequential workloads
+   * @param bytesToProcess size of the block about to be transferred
+   * @return absolute byte position for the operation
+   */
+  static long resolvePosition(
+      boolean random, Random rng, long fileSize, long sequentialOffset, int bytesToProcess) {
+    if (!random) {
+      return sequentialOffset;
+    }
+    long maxPosition = Math.max(0L, fileSize - bytesToProcess);
+    return rng.nextLong(maxPosition + 1);
+  }
+
+  /**
+   * Returns the generator bound to a worker thread for a single run.
+   *
+   * <p>When a fixed seed is configured the generator is rebuilt from {@code baseSeed} mixed with
+   * the thread id at the start of every run, so repeated runs replay an identical position
+   * sequence. Without a fixed seed the generator is seeded from {@link ThreadLocalRandom}.
+   *
+   * @param threadId zero-based worker index
+   * @return generator for this run
+   */
+  Random getThreadRng(int threadId) {
+    if (!useFixedSeed) {
+      return new Random(ThreadLocalRandom.current().nextLong());
+    }
+    return new Random(baseSeed ^ (threadId * THREAD_SEED_MIX));
+  }
+
+  @Override
+  public List<BenchmarkResult> runAll() throws IOException, InterruptedException {
+    try {
+      paths.ensureTestDirectory();
+      long totalSpaceNeeded = config.getFileSizeBytes() * config.getThreads();
+      paths.validateFreeSpace(totalSpaceNeeded);
+
+      logger.info(
+          "Starting benchmark: testTypes={}, fileSize={}, iterations={}, warmup={}, threads={}",
+          config.getTestTypes(),
+          config.getFileSizeBytes(),
+          config.getIterations(),
+          config.getWarmupIterations(),
+          config.getThreads());
+
+      int runId = 1;
+
+      int warmup = config.getWarmupIterations();
+      if (warmup > 0) {
+        logger.info("Starting {} warmup iteration(s)", warmup);
+        for (BenchmarkConfig.TestType type : config.getTestTypes()) {
+          for (int i = 0; i < warmup; i++) {
+            runMultiThreaded(-runId, type);
+            runId++;
+          }
         }
-    }
+        results.clear();
+        logger.info("Warmup completed, starting measured runs");
+      }
 
-    public SystemInfoSnapshot getSystemInfo() {
-        return systemInfo;
-    }
-
-    private Random getThreadRng(int threadId) {
-        if (!useFixedSeed) {
-            return new Random(ThreadLocalRandom.current().nextLong());
+      runId = 1;
+      totalIterations = config.getIterations() * config.getTestTypes().size();
+      if (config.getVerbosity() > 0 && System.console() != null) {
+        startProgressReporting();
+      }
+      int iterationCount = 0;
+      for (BenchmarkConfig.TestType type : config.getTestTypes()) {
+        for (int i = 0; i < config.getIterations(); i++) {
+          currentTestType = type;
+          currentIteration = iterationCount + 1;
+          progressBytesProcessed.set(0);
+          List<BenchmarkResult> iterationResults = runMultiThreaded(runId++, type);
+          results.addAll(iterationResults);
+          iterationCount++;
         }
-        return threadRngMap.computeIfAbsent(threadId,
-            tid -> new Random(baseSeed ^ (tid * 0x9E3779B97F4A7C15L)));
+      }
+      return Collections.unmodifiableList(results);
+    } finally {
+      stopProgressReporting();
+      shutdownExecutors();
+      if (!config.isRetainTestFiles()) {
+        paths.cleanupSessionFiles(false);
+      }
     }
+  }
 
-    @Override
-    public List<BenchmarkResult> runAll() throws IOException, InterruptedException {
-        try {
-            paths.ensureTestDirectory();
-            long totalSpaceNeeded = config.getFileSizeBytes() * config.getThreads();
-            paths.validateFreeSpace(totalSpaceNeeded);
+  private void startProgressReporting() {
+    progressExecutor =
+        Executors.newSingleThreadScheduledExecutor(
+            r -> {
+              Thread t = new Thread(r, "progress-reporter");
+              t.setDaemon(true);
+              return t;
+            });
+    progressExecutor.scheduleAtFixedRate(this::printProgress, 1, 1, TimeUnit.SECONDS);
+  }
 
-            logger.info("Starting benchmark: testTypes={}, fileSize={}, iterations={}, warmup={}, threads={}",
-                    config.getTestTypes(), config.getFileSizeBytes(), config.getIterations(),
-                    config.getWarmupIterations(), config.getThreads());
-
-            int runId = 1;
-
-            int warmup = config.getWarmupIterations();
-            if (warmup > 0) {
-                logger.info("Starting {} warmup iteration(s)", warmup);
-                for (BenchmarkConfig.TestType type : config.getTestTypes()) {
-                    for (int i = 0; i < warmup; i++) {
-                        runMultiThreaded(-runId, type);
-                        runId++;
-                    }
-                }
-                results.clear();
-                logger.info("Warmup completed, starting measured runs");
-            }
-
-            runId = 1;
-            totalIterations = config.getIterations() * config.getTestTypes().size();
-            if (config.getVerbosity() > 0 && System.console() != null) {
-                startProgressReporting();
-            }
-            int iterationCount = 0;
-            for (BenchmarkConfig.TestType type : config.getTestTypes()) {
-                for (int i = 0; i < config.getIterations(); i++) {
-                    currentTestType = type;
-                    currentIteration = iterationCount + 1;
-                    progressBytesProcessed.set(0);
-                    List<BenchmarkResult> iterationResults = runMultiThreaded(runId++, type);
-                    results.addAll(iterationResults);
-                    iterationCount++;
-                }
-            }
-            return Collections.unmodifiableList(results);
-        } finally {
-            stopProgressReporting();
-            shutdownExecutors();
-            if (!config.isRetainTestFiles()) {
-                paths.cleanupSessionFiles(false);
-            }
-        }
+  private void stopProgressReporting() {
+    if (progressExecutor != null && !progressExecutor.isShutdown()) {
+      progressExecutor.shutdownNow();
     }
+    System.out.println();
+  }
 
-    private void startProgressReporting() {
-        progressExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "progress-reporter");
-            t.setDaemon(true);
-            return t;
-        });
-        progressExecutor.scheduleAtFixedRate(this::printProgress, 1, 1, TimeUnit.SECONDS);
-    }
-
-    private void stopProgressReporting() {
-        if (progressExecutor != null && !progressExecutor.isShutdown()) {
-            progressExecutor.shutdownNow();
-        }
-        System.out.println();
-    }
-
-    private void printProgress() {
-        long totalForIteration = (long) config.getTestTypes().size() * config.getIterations();
-        double overallPercent = (double) currentIteration / totalForIteration * 100;
-        long bytes = progressBytesProcessed.get();
-        double elapsed = Duration.between(progressStartTime, Instant.now()).toMillis() / 1000.0;
-        double throughputMBps = elapsed > 0 ? (bytes / (1024.0 * 1024.0)) / elapsed : 0;
-        long etaSeconds = throughputMBps > 0
-            ? (long) ((config.getFileSizeBytes() * config.getThreads()
-                * (totalForIteration - currentIteration + 1)
-                - bytes) / (throughputMBps * 1024 * 1024))
+  private void printProgress() {
+    long totalForIteration = (long) config.getTestTypes().size() * config.getIterations();
+    double overallPercent = (double) currentIteration / totalForIteration * 100;
+    long bytes = progressBytesProcessed.get();
+    double elapsed = Duration.between(progressStartTime, Instant.now()).toMillis() / 1000.0;
+    double throughputMbps = elapsed > 0 ? (bytes / (1024.0 * 1024.0)) / elapsed : 0;
+    long etaSeconds =
+        throughputMbps > 0
+            ? (long)
+                ((config.getFileSizeBytes() * config.getThreads()
+                        * (totalForIteration - currentIteration + 1)
+                        - bytes)
+                    / (throughputMbps * 1024 * 1024))
             : 0;
 
-        int barLen = 20;
-        int filled = Math.min(barLen, Math.max(0, (int) (overallPercent / 100 * barLen)));
-        String progressBar = "=".repeat(filled) + " ".repeat(barLen - filled);
+    int barLen = 20;
+    int filled = Math.min(barLen, Math.max(0, (int) (overallPercent / 100 * barLen)));
+    String progressBar = "=".repeat(filled) + " ".repeat(barLen - filled);
 
-        System.out.printf("\r[%s] %3.0f%% | %s | %8.0f MB/s | ETA: %2dm %02ds | Iteration %d/%d",
-            progressBar, overallPercent, currentTestType, throughputMBps,
-            etaSeconds / 60, etaSeconds % 60, currentIteration, totalIterations);
-    }
+    System.out.printf(
+        "\r[%s] %3.0f%% | %s | %8.0f MB/s | ETA: %2dm %02ds | Iteration %d/%d",
+        progressBar,
+        overallPercent,
+        currentTestType,
+        throughputMbps,
+        etaSeconds / 60,
+        etaSeconds % 60,
+        currentIteration,
+        totalIterations);
+  }
 
-    private List<BenchmarkResult> runMultiThreaded(int runId, BenchmarkConfig.TestType type)
-            throws InterruptedException {
+  private List<BenchmarkResult> runMultiThreaded(int runId, BenchmarkConfig.TestType type)
+      throws InterruptedException {
 
-        CountDownLatch latch = new CountDownLatch(config.getThreads());
-        List<Future<BenchmarkResult>> futures = new ArrayList<>();
+    CountDownLatch latch = new CountDownLatch(config.getThreads());
+    List<Future<BenchmarkResult>> futures = new ArrayList<>();
 
-        for (int threadId = 0; threadId < config.getThreads(); threadId++) {
-            final int tid = threadId;
-            final int currentRunId = runId;
-            Future<BenchmarkResult> future = ioExecutor.submit(() -> {
+    for (int threadId = 0; threadId < config.getThreads(); threadId++) {
+      final int tid = threadId;
+      final int currentRunId = runId;
+      Future<BenchmarkResult> future =
+          ioExecutor.submit(
+              () -> {
                 try {
-                    Path threadFile = paths.testFilePath(currentRunId, type.name().toLowerCase() + "-t" + tid);
-                    if (config.getIoMode() == BenchmarkConfig.IoMode.ASYNC) {
-                        return runSingleThreadAsync(threadFile, currentRunId, type, tid);
-                    } else {
-                        return runSingleThreadSync(threadFile, currentRunId, type, tid);
-                    }
+                  Path threadFile =
+                      paths.testFilePath(
+                          currentRunId, type.name().toLowerCase(Locale.ROOT) + "-t" + tid);
+                  if (config.getIoMode() == BenchmarkConfig.IoMode.ASYNC) {
+                    return runSingleThreadAsync(threadFile, currentRunId, type, tid);
+                  } else {
+                    return runSingleThreadSync(threadFile, currentRunId, type, tid);
+                  }
                 } finally {
-                    latch.countDown();
+                  latch.countDown();
                 }
-            });
-            futures.add(future);
-        }
-
-        if (!latch.await(config.getMaxPerTestTarget().toMinutes(), TimeUnit.MINUTES)) {
-            logger.error("Benchmark timeout - forcing shutdown");
-            ioExecutor.shutdownNow();
-            throw new InterruptedException("Benchmark exceeded time limit");
-        }
-
-        List<BenchmarkResult> iterationResults = new ArrayList<>();
-        for (Future<BenchmarkResult> f : futures) {
-            try {
-                iterationResults.add(f.get());
-            } catch (ExecutionException e) {
-                throw new RuntimeException("Thread execution failed", e.getCause());
-            }
-        }
-        return iterationResults;
+              });
+      futures.add(future);
     }
 
-    private BenchmarkResult runSingleThreadSync(Path file, int runId, BenchmarkConfig.TestType type, int threadId)
-            throws IOException {
+    if (!latch.await(config.getMaxPerTestTarget().toMinutes(), TimeUnit.MINUTES)) {
+      logger.error("Benchmark timeout - forcing shutdown");
+      ioExecutor.shutdownNow();
+      throw new InterruptedException("Benchmark exceeded time limit");
+    }
 
-        long fileSize = config.getFileSizeBytes();
-        boolean isWrite = (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE);
-        boolean isRandom = (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE);
-        boolean isMixed = (type == BenchmarkConfig.TestType.MIXED_RW);
-        boolean isReadOnly = !isWrite && !isMixed;
+    List<BenchmarkResult> iterationResults = new ArrayList<>();
+    for (Future<BenchmarkResult> f : futures) {
+      try {
+        iterationResults.add(f.get());
+      } catch (ExecutionException e) {
+        throw new RuntimeException("Thread execution failed", e.getCause());
+      }
+    }
+    return iterationResults;
+  }
 
-        ByteBuffer buffer = bufferPool.get();
-        Random rng = getThreadRng(threadId);
-        Histogram histogram = new Histogram(3600000000000L, 3);
-        Instant start = Instant.now();
-        long totalOps = 0;
-        long bytesProcessed = 0;
-        long bytesRead = 0;
-        long bytesWritten = 0;
+  private BenchmarkResult runSingleThreadSync(
+      Path file, int runId, BenchmarkConfig.TestType type, int threadId) throws IOException {
 
-        try (FileChannel channel = FileChannel.open(file,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.READ,
-                StandardOpenOption.WRITE)) {
+    long fileSize = config.getFileSizeBytes();
+    int blockSize = config.getBlockSizeBytes();
+    boolean isWrite =
+        type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE;
+    boolean isRandom =
+        type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE;
+    boolean isMixed = type == BenchmarkConfig.TestType.MIXED_RW;
+    boolean isReadOnly = !isWrite && !isMixed;
+    int readThreshold = (int) (config.getMixedReadPercent() * 0.01 * Integer.MAX_VALUE);
 
-            if (config.isPreallocateFiles() && (isWrite || isMixed)) {
-                channel.truncate(fileSize);
-            }
+    ByteBuffer buffer = bufferPool.get();
+    Random rng = getThreadRng(threadId);
+    Histogram histogram = new Histogram(3600000000000L, 3);
+    Instant start = Instant.now();
+    long totalOps = 0;
+    long bytesProcessed = 0;
+    long bytesRead = 0;
+    long bytesWritten = 0;
 
-            if (isMixed) {
-                int readPercent = config.getMixedReadPercent();
-                int readThreshold = (int) (readPercent * 0.01 * Integer.MAX_VALUE);
-                int blockSize = config.getBlockSizeBytes();
+    try (FileChannel channel =
+        FileChannel.open(
+            file,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.READ,
+            StandardOpenOption.WRITE)) {
 
-                while (bytesProcessed < fileSize) {
-                    int bytesToProcess = (int) Math.min(blockSize, fileSize - bytesProcessed);
+      if (config.isPreallocateFiles() && (isWrite || isMixed)) {
+        channel.truncate(fileSize);
+      }
 
-                    queueSemaphore.acquireUninterruptibly();
-                    try {
-                        long randomPos = ThreadLocalRandom.current().nextLong(0, Math.max(1, fileSize - bytesToProcess));
-                        channel.position(randomPos);
+      if (isMixed) {
+        while (bytesProcessed < fileSize) {
+          int bytesToProcess = (int) Math.min(blockSize, fileSize - bytesProcessed);
 
-                        long startNs = System.nanoTime();
-                        boolean doRead = rng.nextInt(Integer.MAX_VALUE) < readThreshold;
+          queueSemaphore.acquireUninterruptibly();
+          try {
+            boolean doRead = rng.nextInt(Integer.MAX_VALUE) < readThreshold;
+            long position = resolvePosition(true, rng, fileSize, bytesProcessed, bytesToProcess);
+            channel.position(position);
 
-                        if (doRead) {
-                            buffer.clear();
-                            buffer.limit(bytesToProcess);
-                            int read = channel.read(buffer);
-                            if (read == -1) break;
-                            bytesRead += read;
-                        } else {
-                            byte[] temp = new byte[bytesToProcess];
-                            rng.nextBytes(temp);
-                            buffer.clear();
-                            buffer.put(temp);
-                            buffer.flip();
-                            int written = channel.write(buffer);
-                            bytesWritten += written;
-                        }
+            long startNs = System.nanoTime();
 
-                        long endNs = System.nanoTime();
-                        histogram.recordValue(endNs - startNs);
-                        bytesProcessed += bytesToProcess;
-                        totalOps++;
-
-                        if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 &&
-                            totalOps % config.getSyncEveryNBlocks() == 0) {
-                            channel.force(false);
-                        }
-                    } finally {
-                        queueSemaphore.release();
-                    }
-                    progressBytesProcessed.addAndGet(bytesToProcess);
-                }
+            if (doRead) {
+              buffer.clear();
+              buffer.limit(bytesToProcess);
+              int read = channel.read(buffer);
+              if (read == -1) {
+                break;
+              }
+              bytesRead += read;
             } else {
-                if (isReadOnly) {
-                    channel.truncate(fileSize);
-                    long prefillWritten = 0;
-                    while (prefillWritten < fileSize) {
-                        int toWrite = (int) Math.min(config.getBlockSizeBytes(), fileSize - prefillWritten);
-                        byte[] temp = new byte[toWrite];
-                        rng.nextBytes(temp);
-                        buffer.clear();
-                        buffer.put(temp);
-                        buffer.flip();
-                        prefillWritten += channel.write(buffer);
-                    }
-                    channel.position(0);
-                    start = Instant.now();
-                }
-
-                while (bytesProcessed < fileSize) {
-                    int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
-
-                    queueSemaphore.acquireUninterruptibly();
-                    try {
-                        long startNs = System.nanoTime();
-
-                        if (isWrite) {
-                            byte[] temp = new byte[bytesToProcess];
-                            rng.nextBytes(temp);
-                            buffer.clear();
-                            buffer.put(temp);
-                            buffer.flip();
-                            int written = channel.write(buffer);
-                            bytesWritten += written;
-                            bytesProcessed += written;
-                        } else {
-                            buffer.clear();
-                            buffer.limit(bytesToProcess);
-                            int read = channel.read(buffer);
-                            if (read == -1) break;
-                            bytesRead += read;
-                            bytesProcessed += read;
-                        }
-
-                        if (isRandom && fileSize > 0) {
-                            long maxPos = Math.max(0, fileSize - bytesToProcess);
-                            channel.position(ThreadLocalRandom.current().nextLong(0, maxPos + 1));
-                        }
-
-                        long endNs = System.nanoTime();
-                        histogram.recordValue(endNs - startNs);
-                        totalOps++;
-
-                        if (config.isForceSync() && config.getSyncEveryNBlocks() > 0 &&
-                            totalOps % config.getSyncEveryNBlocks() == 0) {
-                            channel.force(false);
-                        }
-                    } finally {
-                        queueSemaphore.release();
-                    }
-                    progressBytesProcessed.addAndGet(bytesToProcess);
-                }
+              byte[] temp = new byte[bytesToProcess];
+              rng.nextBytes(temp);
+              buffer.clear();
+              buffer.put(temp);
+              buffer.flip();
+              int written = channel.write(buffer);
+              bytesWritten += written;
             }
 
-            if (config.isForceSync() && config.getSyncEveryNBlocks() == 0) {
-                channel.force(true);
+            long endNs = System.nanoTime();
+            histogram.recordValue(Math.max(1L, endNs - startNs));
+            bytesProcessed += bytesToProcess;
+            totalOps++;
+
+            if (config.isForceSync()
+                && config.getSyncEveryNBlocks() > 0
+                && totalOps % config.getSyncEveryNBlocks() == 0) {
+              channel.force(false);
             }
+          } finally {
+            queueSemaphore.release();
+          }
+          progressBytesProcessed.addAndGet(bytesToProcess);
+        }
+      } else {
+        if (isReadOnly) {
+          channel.truncate(fileSize);
+          long prefillWritten = 0;
+          while (prefillWritten < fileSize) {
+            int toWrite = (int) Math.min(blockSize, fileSize - prefillWritten);
+            byte[] temp = new byte[toWrite];
+            rng.nextBytes(temp);
+            buffer.clear();
+            buffer.put(temp);
+            buffer.flip();
+            prefillWritten += channel.write(buffer);
+          }
+          channel.position(0);
+          start = Instant.now();
         }
 
-        Instant end = Instant.now();
-        return calculateResult(runId, threadId, type, bytesProcessed, bytesRead, bytesWritten,
-                start, end, totalOps, histogram);
-    }
+        while (bytesProcessed < fileSize) {
+          int bytesToProcess = (int) Math.min(blockSize, fileSize - bytesProcessed);
 
-    private BenchmarkResult runSingleThreadAsync(Path file, int runId, BenchmarkConfig.TestType type, int threadId)
-            throws IOException {
+          queueSemaphore.acquireUninterruptibly();
+          try {
+            long position =
+                resolvePosition(isRandom, rng, fileSize, bytesProcessed, bytesToProcess);
+            channel.position(position);
 
-        long fileSize = config.getFileSizeBytes();
-        boolean isWrite = (type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE);
-        boolean isRandom = (type == BenchmarkConfig.TestType.RAND_READ || type == BenchmarkConfig.TestType.RAND_WRITE);
-        boolean isReadOnly = !isWrite;
+            long startNs = System.nanoTime();
 
-        ByteBuffer buffer = bufferPool.get();
-        Random rng = getThreadRng(threadId);
-        Histogram histogram = new Histogram(3600000000000L, 3);
-        long bytesProcessed = 0;
-        long totalOps = 0;
-        long bytesRead = 0;
-        long bytesWritten = 0;
-
-        try (AsynchronousFileChannel channel = AsynchronousFileChannel.open(file,
-                StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-
-            if (config.isPreallocateFiles() && isWrite) {
-                try (FileChannel fc = FileChannel.open(file,
-                        StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-                    fc.truncate(fileSize);
-                }
+            if (isWrite) {
+              byte[] temp = new byte[bytesToProcess];
+              rng.nextBytes(temp);
+              buffer.clear();
+              buffer.put(temp);
+              buffer.flip();
+              int written = channel.write(buffer);
+              bytesWritten += written;
+              bytesProcessed += written;
+            } else {
+              buffer.clear();
+              buffer.limit(bytesToProcess);
+              int read = channel.read(buffer);
+              if (read == -1) {
+                break;
+              }
+              bytesRead += read;
+              bytesProcessed += read;
             }
 
-            if (isReadOnly) {
-                try (FileChannel fc = FileChannel.open(file,
-                        StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-                    fc.truncate(fileSize);
-                    long prefillWritten = 0;
-                    ByteBuffer fillBuf = ByteBuffer.allocate(config.getBlockSizeBytes());
-                    while (prefillWritten < fileSize) {
-                        int toWrite = (int) Math.min(config.getBlockSizeBytes(), fileSize - prefillWritten);
-                        byte[] temp = new byte[toWrite];
-                        rng.nextBytes(temp);
-                        fillBuf.clear();
-                        fillBuf.put(temp);
-                        fillBuf.flip();
-                        prefillWritten += fc.write(fillBuf);
-                    }
-                }
+            long endNs = System.nanoTime();
+            histogram.recordValue(Math.max(1L, endNs - startNs));
+            totalOps++;
+
+            if (config.isForceSync()
+                && config.getSyncEveryNBlocks() > 0
+                && totalOps % config.getSyncEveryNBlocks() == 0) {
+              channel.force(false);
             }
-
-            Instant start = Instant.now();
-
-            while (bytesProcessed < fileSize) {
-                queueSemaphore.acquireUninterruptibly();
-                int bytesToProcess = (int) Math.min(config.getBlockSizeBytes(), fileSize - bytesProcessed);
-                buffer.clear();
-                buffer.limit(bytesToProcess);
-
-                final CountDownLatch opLatch = new CountDownLatch(1);
-                final long[] resultHolder = new long[1];
-                final boolean[] failed = new boolean[1];
-                final long[] startNsRef = {System.nanoTime()};
-
-                if (isWrite) {
-                    byte[] temp = new byte[bytesToProcess];
-                    rng.nextBytes(temp);
-                    buffer.put(temp);
-                    buffer.flip();
-
-                    channel.write(buffer, channel.size(), null, new CompletionHandler<Integer, Void>() {
-                        @Override
-                        public void completed(Integer written, Void attachment) {
-                            long latencyNs = System.nanoTime() - startNsRef[0];
-                            synchronized (histogram) {
-                                histogram.recordValue(latencyNs);
-                            }
-                            resultHolder[0] = written;
-                            opLatch.countDown();
-                        }
-                        @Override
-                        public void failed(Throwable exc, Void attachment) {
-                            failed[0] = true;
-                            opLatch.countDown();
-                        }
-                    });
-                } else {
-                    channel.read(buffer, bytesProcessed, null, new CompletionHandler<Integer, Void>() {
-                        @Override
-                        public void completed(Integer read, Void attachment) {
-                            long latencyNs = System.nanoTime() - startNsRef[0];
-                            synchronized (histogram) {
-                                histogram.recordValue(latencyNs);
-                            }
-                            resultHolder[0] = read >= 0 ? read : 0;
-                            opLatch.countDown();
-                        }
-                        @Override
-                        public void failed(Throwable exc, Void attachment) {
-                            failed[0] = true;
-                            opLatch.countDown();
-                        }
-                    });
-                }
-
-                try {
-                    opLatch.await();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    queueSemaphore.release();
-                    throw new IOException("Async I/O interrupted", e);
-                }
-
-                if (failed[0]) {
-                    queueSemaphore.release();
-                    throw new IOException("Async I/O operation failed");
-                }
-
-                bytesProcessed += resultHolder[0];
-                if (isWrite) {
-                    bytesWritten += resultHolder[0];
-                } else {
-                    bytesRead += resultHolder[0];
-                }
-                totalOps++;
-
-                if (isRandom && fileSize > 0) {
-                    long maxPos = Math.max(0, fileSize - bytesToProcess);
-                    // position for next random operation (for write, use channel.size as before)
-                    // this is handled implicitly for async by next operation's position
-                }
-
-                queueSemaphore.release();
-                progressBytesProcessed.addAndGet(resultHolder[0]);
-
-                if (resultHolder[0] == 0) {
-                    break;
-                }
-            }
-
-            Instant end = Instant.now();
-            return calculateResult(runId, threadId, type, bytesProcessed, bytesRead, bytesWritten,
-                    start, end, totalOps, histogram);
+          } finally {
+            queueSemaphore.release();
+          }
+          progressBytesProcessed.addAndGet(bytesToProcess);
         }
+      }
+
+      if (config.isForceSync() && config.getSyncEveryNBlocks() == 0) {
+        channel.force(true);
+      }
     }
 
-    private BenchmarkResult calculateResult(int runId, int threadId, BenchmarkConfig.TestType type,
-            long bytesProcessed, long bytesRead, long bytesWritten,
-            Instant start, Instant end, long totalOps, Histogram histogram) {
+    Instant end = Instant.now();
+    return calculateResult(
+        runId, threadId, type, bytesProcessed, bytesRead, bytesWritten, start, end, totalOps,
+        histogram);
+  }
 
-        Duration elapsed = Duration.between(start, end);
-        long elapsedNanos = elapsed.toNanos();
-        double elapsedSeconds = elapsedNanos / 1_000_000_000.0;
+  private BenchmarkResult runSingleThreadAsync(
+      Path file, int runId, BenchmarkConfig.TestType type, int threadId) throws IOException {
 
-        double throughputMBps = (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds;
-        double avgLatencyMs = (elapsedNanos / 1_000_000.0) / totalOps;
-        double avgLatencyNs = (double) elapsedNanos / totalOps;
-        double iops = totalOps / elapsedSeconds;
+    long fileSize = config.getFileSizeBytes();
+    int blockSize = config.getBlockSizeBytes();
+    boolean isWrite =
+        type == BenchmarkConfig.TestType.SEQ_WRITE || type == BenchmarkConfig.TestType.RAND_WRITE;
+    boolean isMixed = type == BenchmarkConfig.TestType.MIXED_RW;
+    boolean isRandom =
+        type == BenchmarkConfig.TestType.RAND_READ
+            || type == BenchmarkConfig.TestType.RAND_WRITE
+            || isMixed;
+    boolean isReadOnly = !isWrite && !isMixed;
+    int readThreshold = (int) (config.getMixedReadPercent() * 0.01 * Integer.MAX_VALUE);
 
-        double p50 = histogram.getValueAtPercentile(50.0);
-        double p95 = histogram.getValueAtPercentile(95.0);
-        double p99 = histogram.getValueAtPercentile(99.0);
-        double p999 = histogram.getValueAtPercentile(99.9);
-        long maxLatencyNs = histogram.getMaxValue();
+    Random rng = getThreadRng(threadId);
+    Histogram histogram = new Histogram(3600000000000L, 3);
+    AtomicLong bytesReadAcc = new AtomicLong();
+    AtomicLong bytesWrittenAcc = new AtomicLong();
+    AtomicLong opsAcc = new AtomicLong();
 
-        String rid = String.format("run-%03d-thread-%02d", runId, threadId);
-        String typeName = type != null ? type.name() : "";
-        BenchmarkResult result = new BenchmarkResult(rid, typeName, bytesProcessed, elapsed,
-                elapsedNanos, throughputMBps, avgLatencyMs, avgLatencyNs, iops, end,
-                p50, p95, p99, p999, maxLatencyNs);
+    try (AsynchronousFileChannel channel = asyncChannelFactory.open(file)) {
 
-        logger.debug("Run {} completed: type={}, throughput={:.2f} MB/s, latency={:.2f} ms, p99={:.0f} ns",
-                rid, type, throughputMBps, avgLatencyMs, p99);
-        return result;
-    }
+      if (config.isPreallocateFiles() && (isWrite || isMixed)) {
+        truncateFile(file, fileSize);
+      }
 
-    @Override
-    public void startMetricsPolling() {
-        metricsCollector.start();
-    }
+      if (isReadOnly) {
+        prefillFile(file, fileSize, blockSize, rng);
+      }
 
-    @Override
-    public List<MetricsSnapshot> getMetricsLog() {
-        return metricsCollector.getMetricsLog();
-    }
+      // One phaser party belongs to the dispatcher. Every submitted operation registers its own
+      // party, so awaiting the phase transition blocks only until the whole submitted batch is
+      // quiescent - never per individual operation.
+      final Instant start = Instant.now();
+      Phaser completion = new Phaser(1);
+      AtomicReference<Throwable> failure = new AtomicReference<>();
+      BlockingQueue<ByteBuffer> freeBuffers = new ArrayBlockingQueue<>(config.getQueueDepth());
 
-    private void shutdownExecutors() {
-        logger.info("Shutting down executors");
-        metricsCollector.stop();
-        ioExecutor.shutdown();
+      long offset = 0;
+      while (offset < fileSize) {
+        if (failure.get() != null) {
+          break;
+        }
+
+        // Backpressure only: when a slot is free this returns immediately. The dispatcher keeps
+        // queueDepth operations in flight instead of waiting for each completion.
+        try {
+          queueSemaphore.acquire();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          failure.compareAndSet(null, e);
+          break;
+        }
+
+        if (failure.get() != null) {
+          queueSemaphore.release();
+          break;
+        }
+
+        int bytesToProcess = (int) Math.min(blockSize, fileSize - offset);
+        long position = resolvePosition(isRandom, rng, fileSize, offset, bytesToProcess);
+        boolean doWrite = isWrite || (isMixed && rng.nextInt(Integer.MAX_VALUE) >= readThreshold);
+
+        // Each in-flight operation owns its buffer: a shared rotating buffer would be overwritten
+        // while the channel still reads from or writes into it.
+        ByteBuffer buffer = freeBuffers.poll();
+        if (buffer == null) {
+          buffer = allocateBuffer(blockSize);
+        }
+        buffer.clear();
+        buffer.limit(bytesToProcess);
+        if (doWrite) {
+          byte[] payload = new byte[bytesToProcess];
+          rng.nextBytes(payload);
+          buffer.put(payload);
+          buffer.flip();
+        }
+
+        completion.register();
+        AsyncOpHandler handler =
+            new AsyncOpHandler(
+                channel,
+                completion,
+                queueSemaphore,
+                histogram,
+                freeBuffers,
+                failure,
+                buffer,
+                position,
+                doWrite,
+                bytesReadAcc,
+                bytesWrittenAcc,
+                opsAcc,
+                progressBytesProcessed,
+                System.nanoTime());
 
         try {
-            if (!ioExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
-                logger.warn("IO executor tasks did not complete within timeout, forcing shutdown");
-                ioExecutor.shutdownNow();
-                if (!ioExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    logger.error("IO executor did not terminate after forced shutdown");
-                }
-            }
-        } catch (InterruptedException e) {
-            logger.error("Interrupted while waiting for executor shutdown", e);
-            Thread.currentThread().interrupt();
+          if (doWrite) {
+            channel.write(buffer, position, null, handler);
+          } else {
+            channel.read(buffer, position, null, handler);
+          }
+        } catch (RuntimeException e) {
+          // Dispatch failed before the channel accepted the operation. The handler undoes exactly
+          // the bookkeeping it owns (permit, phaser party, buffer) and records the failure.
+          handler.abort(e);
+          break;
         }
+
+        offset += bytesToProcess;
+      }
+
+      // Drop the dispatcher's own party, then block only until every submitted op has completed.
+      int phase = completion.arriveAndDeregister();
+      awaitCompletion(completion, phase, failure);
+
+      Throwable error = failure.get();
+      if (error != null) {
+        throw new IOException("Async I/O operation failed", error);
+      }
+
+      // Count bytes that actually moved. Short reads/writes are retried inside the handler, so a
+      // successful run always accounts for the full file size.
+      long bytesProcessed = bytesReadAcc.get() + bytesWrittenAcc.get();
+      Instant end = Instant.now();
+      return calculateResult(
+          runId,
+          threadId,
+          type,
+          bytesProcessed,
+          bytesReadAcc.get(),
+          bytesWrittenAcc.get(),
+          start,
+          end,
+          opsAcc.get(),
+          histogram);
     }
+  }
+
+  /**
+   * Blocks until every operation submitted to the run has completed.
+   *
+   * <p>Interrupts are recorded as a run failure but do not abandon in-flight operations, so the
+   * queue permits and phaser parties are always reclaimed before the thread exits.
+   *
+   * @param completion phaser that tracks the dispatcher and every submitted operation
+   * @param phase dispatcher phase to await
+   * @param failure sink that receives an interrupt so the caller can fail the run
+   */
+  private static void awaitCompletion(
+      Phaser completion, int phase, AtomicReference<Throwable> failure) {
+    boolean interrupted = false;
+    while (completion.getPhase() == phase) {
+      try {
+        completion.awaitAdvanceInterruptibly(phase);
+      } catch (InterruptedException e) {
+        interrupted = true;
+        failure.compareAndSet(null, e);
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private ByteBuffer allocateBuffer(int capacity) {
+    return config.isUseDirectBuffer()
+        ? ByteBuffer.allocateDirect(capacity)
+        : ByteBuffer.allocate(capacity);
+  }
+
+  /**
+   * Returns a buffer to the free pool, tolerating a full pool.
+   *
+   * <p>A full pool simply means enough buffers are already cached; dropping the surplus buffer is
+   * correct and lets it be collected.
+   *
+   * @param freeBuffers pool to return to
+   * @param buffer buffer to return
+   */
+  private static void returnBuffer(BlockingQueue<ByteBuffer> freeBuffers, ByteBuffer buffer) {
+    if (!freeBuffers.offer(buffer)) {
+      logger.trace("Buffer pool full, discarding surplus buffer");
+    }
+  }
+
+  /**
+   * Completion callback for one logical asynchronous operation.
+   *
+   * <p>Records latency, publishes progress, returns the buffer to the free pool, releases the queue
+   * slot, and deregisters from the run phaser. Short reads and writes are re-dispatched for the
+   * remaining bytes while retaining the same permit and phaser party. A single atomic latch
+   * guarantees that every terminal path releases exactly one semaphore permit and one phaser party,
+   * so neither a failure nor a duplicate callback can leak or double-release resources.
+   */
+  private static final class AsyncOpHandler implements CompletionHandler<Integer, Void> {
+
+    private final AsynchronousFileChannel channel;
+    private final Phaser completion;
+    private final Semaphore queueSemaphore;
+    private final Histogram histogram;
+    private final BlockingQueue<ByteBuffer> freeBuffers;
+    private final AtomicReference<Throwable> failure;
+    private final ByteBuffer buffer;
+    private final boolean write;
+    private final AtomicLong bytesRead;
+    private final AtomicLong bytesWritten;
+    private final AtomicLong ops;
+    private final AtomicLong progress;
+    private final long startNs;
+    private final AtomicBoolean finished = new AtomicBoolean();
+
+    private long position;
+    private int remaining;
+
+    AsyncOpHandler(
+        AsynchronousFileChannel channel,
+        Phaser completion,
+        Semaphore queueSemaphore,
+        Histogram histogram,
+        BlockingQueue<ByteBuffer> freeBuffers,
+        AtomicReference<Throwable> failure,
+        ByteBuffer buffer,
+        long position,
+        boolean write,
+        AtomicLong bytesRead,
+        AtomicLong bytesWritten,
+        AtomicLong ops,
+        AtomicLong progress,
+        long startNs) {
+      this.channel = channel;
+      this.completion = completion;
+      this.queueSemaphore = queueSemaphore;
+      this.histogram = histogram;
+      this.freeBuffers = freeBuffers;
+      this.failure = failure;
+      this.buffer = buffer;
+      this.position = position;
+      this.remaining = buffer.remaining();
+      this.write = write;
+      this.bytesRead = bytesRead;
+      this.bytesWritten = bytesWritten;
+      this.ops = ops;
+      this.progress = progress;
+      this.startNs = startNs;
+    }
+
+    @Override
+    public synchronized void completed(Integer count, Void attachment) {
+      if (finished.get()) {
+        return;
+      }
+      try {
+        handleCompletion(count);
+      } catch (Throwable t) {
+        fail(t);
+      }
+    }
+
+    @Override
+    public synchronized void failed(Throwable exc, Void attachment) {
+      fail(exc != null ? exc : new IOException("unknown async failure"));
+    }
+
+    /**
+     * Cancels an operation whose dispatch call itself threw before completion was delivered.
+     *
+     * @param exc dispatch failure
+     */
+    synchronized void abort(Throwable exc) {
+      failure.compareAndSet(null, exc != null ? exc : new IOException("async dispatch failed"));
+      finish();
+    }
+
+    private void handleCompletion(Integer count) {
+      int moved = count == null ? 0 : count;
+      if (moved <= 0) {
+        fail(new IOException("Async I/O made no progress at position " + position));
+        return;
+      }
+
+      int consumed = Math.min(moved, remaining);
+      if (write) {
+        bytesWritten.addAndGet(consumed);
+      } else {
+        bytesRead.addAndGet(consumed);
+      }
+      progress.addAndGet(consumed);
+      position += consumed;
+      remaining -= consumed;
+
+      if (remaining > 0) {
+        // Retry the tail at the advanced position. The queue slot and phaser party stay checked
+        // out, so the retry cannot exceed queueDepth or be lost from the completion barrier.
+        if (write) {
+          channel.write(buffer, position, null, this);
+        } else {
+          channel.read(buffer, position, null, this);
+        }
+        return;
+      }
+
+      long latencyNs = Math.max(1L, System.nanoTime() - startNs);
+      synchronized (histogram) {
+        histogram.recordValue(latencyNs);
+      }
+      ops.incrementAndGet();
+      finish();
+    }
+
+    private void fail(Throwable exc) {
+      failure.compareAndSet(null, exc);
+      finish();
+    }
+
+    private void finish() {
+      if (finished.compareAndSet(false, true)) {
+        returnBuffer(freeBuffers, buffer);
+        queueSemaphore.release();
+        completion.arriveAndDeregister();
+      }
+    }
+  }
+
+  private static void truncateFile(Path file, long fileSize) throws IOException {
+    try (FileChannel fc =
+        FileChannel.open(
+            file,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.READ,
+            StandardOpenOption.WRITE)) {
+      fc.truncate(fileSize);
+    }
+  }
+
+  private static void prefillFile(Path file, long fileSize, int blockSize, Random rng)
+      throws IOException {
+    try (FileChannel fc =
+        FileChannel.open(
+            file,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.READ,
+            StandardOpenOption.WRITE)) {
+      fc.truncate(fileSize);
+      long prefillWritten = 0;
+      ByteBuffer fillBuffer = ByteBuffer.allocate(blockSize);
+      while (prefillWritten < fileSize) {
+        int toWrite = (int) Math.min(blockSize, fileSize - prefillWritten);
+        byte[] temp = new byte[toWrite];
+        rng.nextBytes(temp);
+        fillBuffer.clear();
+        fillBuffer.put(temp);
+        fillBuffer.flip();
+        prefillWritten += fc.write(fillBuffer);
+      }
+    }
+  }
+
+  private BenchmarkResult calculateResult(
+      int runId,
+      int threadId,
+      BenchmarkConfig.TestType type,
+      long bytesProcessed,
+      long bytesRead,
+      long bytesWritten,
+      Instant start,
+      Instant end,
+      long totalOps,
+      Histogram histogram) {
+
+    Duration elapsed = Duration.between(start, end);
+    long elapsedNanos = elapsed.toNanos();
+    double elapsedSeconds = elapsedNanos / 1_000_000_000.0;
+
+    double throughputMbps = (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds;
+    double avgLatencyMs = (elapsedNanos / 1_000_000.0) / totalOps;
+    double avgLatencyNs = (double) elapsedNanos / totalOps;
+    double iops = totalOps / elapsedSeconds;
+
+    double p50 = histogram.getValueAtPercentile(50.0);
+    double p95 = histogram.getValueAtPercentile(95.0);
+    double p99 = histogram.getValueAtPercentile(99.0);
+    double p999 = histogram.getValueAtPercentile(99.9);
+    long maxLatencyNs = histogram.getMaxValue();
+
+    String rid = String.format("run-%03d-thread-%02d", runId, threadId);
+    String typeName = type != null ? type.name() : "";
+    BenchmarkResult result =
+        new BenchmarkResult(
+            rid,
+            typeName,
+            bytesProcessed,
+            elapsed,
+            elapsedNanos,
+            throughputMbps,
+            avgLatencyMs,
+            avgLatencyNs,
+            iops,
+            end,
+            p50,
+            p95,
+            p99,
+            p999,
+            maxLatencyNs);
+
+    logger.debug(
+        "Run {} completed: type={}, throughput={} MB/s, latency={} ms, p99={} ns",
+        rid,
+        type,
+        throughputMbps,
+        avgLatencyMs,
+        p99);
+    return result;
+  }
+
+  @Override
+  public void startMetricsPolling() {
+    metricsCollector.start();
+  }
+
+  @Override
+  public List<MetricsSnapshot> getMetricsLog() {
+    return metricsCollector.getMetricsLog();
+  }
+
+  private void shutdownExecutors() {
+    logger.info("Shutting down executors");
+    metricsCollector.stop();
+    ioExecutor.shutdown();
+
+    try {
+      if (!ioExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+        logger.warn("IO executor tasks did not complete within timeout, forcing shutdown");
+        ioExecutor.shutdownNow();
+        if (!ioExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+          logger.error("IO executor did not terminate after forced shutdown");
+        }
+      }
+    } catch (InterruptedException e) {
+      logger.error("Interrupted while waiting for executor shutdown", e);
+      Thread.currentThread().interrupt();
+    }
+  }
 }

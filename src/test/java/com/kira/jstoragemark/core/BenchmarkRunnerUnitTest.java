@@ -13,6 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
@@ -58,7 +59,7 @@ class BenchmarkRunnerUnitTest {
         List<BenchmarkResult> results = runner.runAll();
 
         assertThat(results).isNotEmpty();
-        assertThat(results).hasSize(config.getIterations());
+        assertThat(results).hasSize(config.getIterations() * config.getThreads());
     }
 
     @Test
@@ -87,6 +88,7 @@ class BenchmarkRunnerUnitTest {
                 .blockSizeBytes(32 * 1024)
                 .threads(1)
                 .iterations(1)
+                .queueDepth(1)
                 .build();
         BenchmarkPaths writePaths = new BenchmarkPaths(tempDir, writeConfig.getSessionId());
         BenchmarkRunner runner = new BenchmarkRunner(writeConfig, writePaths);
@@ -107,6 +109,7 @@ class BenchmarkRunnerUnitTest {
                 .blockSizeBytes(16 * 1024)
                 .threads(1)
                 .iterations(1)
+                .queueDepth(1)
                 .build();
         BenchmarkPaths randPaths = new BenchmarkPaths(tempDir, randConfig.getSessionId());
         BenchmarkRunner runner = new BenchmarkRunner(randConfig, randPaths);
@@ -120,12 +123,29 @@ class BenchmarkRunnerUnitTest {
     @Test
     @DisplayName("StartMetricsPolling should begin collecting metrics")
     void startMetricsPollingShouldCollectMetrics() throws Exception {
-        BenchmarkRunner runner = new BenchmarkRunner(config, paths);
+        BenchmarkConfig metricsConfig = new BenchmarkConfig.Builder()
+                .testDirectory(tempDir)
+                .addTestType(BenchmarkConfig.TestType.SEQ_WRITE)
+                .fileSizeBytes(ONE_GB)
+                .threads(1)
+                .iterations(1)
+                .queueDepth(1)
+                .metricsPollInterval(Duration.ofMillis(100))
+                .build();
+        BenchmarkPaths metricsPaths = new BenchmarkPaths(tempDir, metricsConfig.getSessionId());
+        BenchmarkRunner runner = new BenchmarkRunner(metricsConfig, metricsPaths);
 
         runner.startMetricsPolling();
-        Thread.sleep(100);
 
-        List<MetricsSnapshot> metrics = runner.getMetricsLog();
+        List<MetricsSnapshot> metrics = List.of();
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        while (System.nanoTime() < deadline) {
+            metrics = runner.getMetricsLog();
+            if (!metrics.isEmpty()) {
+                break;
+            }
+            Thread.sleep(100);
+        }
 
         assertThat(metrics).isNotEmpty();
     }
@@ -152,6 +172,7 @@ class BenchmarkRunnerUnitTest {
                 .fileSizeBytes(ONE_GB)
                 .threads(1)
                 .iterations(1)
+                .queueDepth(1)
                 .build();
         BenchmarkPaths singlePaths = new BenchmarkPaths(tempDir, singleConfig.getSessionId());
         BenchmarkRunner runner = new BenchmarkRunner(singleConfig, singlePaths);
@@ -170,6 +191,7 @@ class BenchmarkRunnerUnitTest {
                 .fileSizeBytes(ONE_GB)
                 .threads(1)
                 .iterations(1)
+                .queueDepth(1)
                 .randomSeed(12345L)
                 .build();
         BenchmarkPaths seedPaths = new BenchmarkPaths(tempDir, seedConfig.getSessionId());
