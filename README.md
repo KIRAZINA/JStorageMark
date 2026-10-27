@@ -19,6 +19,10 @@
 - 📊 **Sequential**: SEQ_READ, SEQ_WRITE
 - 🎲 **Random**: RAND_READ, RAND_WRITE with unbiased positioning
 - ✅ **Multiple test types** can run in a single session
+- 📈 **Direction-aware metrics** - Separate read/write throughput and IOPS for mixed workloads
+- 📊 **Embedded offline charts** - Self-contained SVG charts in HTML reports (latency and throughput/IOPS)
+- 🧩 **Workload profiles** - `DATABASE`, `STREAMING`, `LOGGING`, `OLTP` presets
+- 🎯 **SLA enforcement** - Threshold checks with exit code `2` on breach for CI/CD
 
 ### Configuration Parameters
 - **Test directory** - Dedicated directory for benchmark files
@@ -60,6 +64,8 @@
 - 🔒 **HTML escaping** for XSS prevention
 - 🌍 **Locale-independent** number formatting (Locale.ROOT)
 - 📊 **UTF-8 encoding** for all reports
+- 📈 **Direction-aware columns** in CSV/JSON/HTML: read/write throughput and IOPS
+- 📉 **Embedded SVG charts** in HTML reports: latency distribution and throughput/IOPS comparison
 - ⚡ **Nanosecond precision** timing data
 
 ### Technical Improvements
@@ -157,6 +163,18 @@ java -cp target/jstoragemark-1.0-SNAPSHOT.jar com.kira.jstoragemark.cli.Main \
   -r
 ```
 
+# Workload profile with SLA enforcement
+java -cp target/jstoragemark-1.0-SNAPSHOT.jar com.kira.jstoragemark.cli.Main \
+  -d ./benchmark-tests \
+  -p DATABASE \
+  -s 1073741824 \
+  -n 8 \
+  -i 3 \
+  --min-iops 1000 \
+  --max-p99-ms 5 \
+  --min-throughput-mbps 50
+```
+
 ### CLI Arguments
 | Option | Long | Description | Default |
 |--------|------|-------------|---------|
@@ -170,10 +188,14 @@ java -cp target/jstoragemark-1.0-SNAPSHOT.jar com.kira.jstoragemark.cli.Main \
 | `-q` | `--queue` | Queue depth | `8` |
 | `-f` | `--force-sync` | Force disk sync after writes | `true` |
 | `-y` | `--sync-every` | Sync every N blocks (0=disabled) | `0` |
-| `-p` | `--preallocate` | Preallocate test files | `true` |
+| `-p` | `--profile` | Workload profile: DATABASE, STREAMING, LOGGING, OLTP | none |
+| `-np` | `--no-preallocate` | Disable file preallocation | `false` |
 | `-g` | `--heap-buffer` | Use heap buffer (vs direct) | `false` |
 | `-v` | `--verbosity` | Verbosity (0-2) | `1` |
 | `-r` | `--retain` | Retain test files after run | `false` |
+| | `--min-iops` | Minimum required IOPS SLA threshold | none |
+| | `--max-p99-ms` | Maximum allowed P99 latency in ms SLA threshold | none |
+| | `--min-throughput-mbps` | Minimum required throughput in MB/s SLA threshold | none |
 
 ---
 
@@ -222,7 +244,7 @@ Reports saved in: ./benchmark-tests
 
 ### CSV Report
 ```csv
-RunId,TestType,BytesProcessed,ElapsedMs,ThroughputMBps,AvgLatencyMs,IOPS,Timestamp
+RunId,TestType,BytesProcessed,ElapsedMs,ThroughputMBps,AvgLatencyMs,IOPS,Timestamp,ReadThroughputMBps,WriteThroughputMBps,ReadIOPS,WriteIOPS
 1,SEQ_WRITE,5368709120,2345,2183.50,0.02,111634.33,2024-01-15T10:30:00Z
 2,SEQ_WRITE,5368709120,2201,2326.33,0.02,118947.67,2024-01-15T10:30:02Z
 ...
