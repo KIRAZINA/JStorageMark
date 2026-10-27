@@ -131,7 +131,7 @@ class BenchmarkRunnerAsyncPipelineTest {
   @DisplayName("queueDepth=2 with one thread keeps at most two operations in flight")
   void queueDepthTwoBoundsConcurrency() throws Exception {
     BenchmarkConfig cfg = config(BenchmarkConfig.TestType.SEQ_WRITE, 2, 1);
-    ChannelTracker tracker = new ChannelTracker(FILE_SIZE, completer, 2, 0);
+    ChannelTracker tracker = new ChannelTracker(FILE_SIZE, completer, 20, 0);
 
     run(cfg, tracker);
 
