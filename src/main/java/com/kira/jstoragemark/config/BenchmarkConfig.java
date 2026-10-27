@@ -6,6 +6,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -52,6 +53,14 @@ public final class BenchmarkConfig {
         HTML
     }
 
+    /** Preset workload profiles for common storage scenarios. */
+    public enum WorkloadProfile {
+        DATABASE,
+        STREAMING,
+        LOGGING,
+        OLTP
+    }
+
     // ---- Required core fields ----------------------------------------------
 
     private final Path testDirectory;              // Dedicated directory for safe testing
@@ -92,6 +101,16 @@ public final class BenchmarkConfig {
     private final Set<ReportFormat> reportFormats; // CSV/JSON mandatory; HTML optional
     private final boolean embedCharts;             // If HTML selected, embed PNG/SVG charts
 
+    // ---- Workload profile ---------------------------------------------------
+
+    private final WorkloadProfile workloadProfile; // Optional preset profile
+
+    // ---- SLA thresholds -----------------------------------------------------
+
+    private final Double minIops;                  // Minimum required IOPS (optional)
+    private final Double maxP99LatencyMs;          // Maximum allowed P99 latency in ms (optional)
+    private final Double minThroughputMBps;        // Minimum required throughput in MB/s (optional)
+
     // ---- Non-functional guides ---------------------------------------------
 
     private final Duration maxPerTestTarget;       // Soft guideline to keep test under 5–10 minutes
@@ -127,6 +146,11 @@ public final class BenchmarkConfig {
 
         this.reportFormats = Collections.unmodifiableSet(new LinkedHashSet<>(b.reportFormats));
         this.embedCharts = b.embedCharts;
+
+        this.workloadProfile = b.workloadProfile;
+        this.minIops = b.minIops;
+        this.maxP99LatencyMs = b.maxP99LatencyMs;
+        this.minThroughputMBps = b.minThroughputMBps;
 
         this.maxPerTestTarget = b.maxPerTestTarget;
 
@@ -233,6 +257,13 @@ public final class BenchmarkConfig {
     public Duration getMetricsPollInterval() { return metricsPollInterval; }
     public Set<ReportFormat> getReportFormats() { return reportFormats; }
     public boolean isEmbedCharts() { return embedCharts; }
+    public WorkloadProfile getWorkloadProfile() { return workloadProfile; }
+    public WorkloadProfile getProfile() { return workloadProfile; }
+    public Double getMinIops() { return minIops; }
+    public Double getMaxP99LatencyMs() { return maxP99LatencyMs; }
+    public Double getMaxP99Ms() { return maxP99LatencyMs; }
+    public Double getMinThroughputMBps() { return minThroughputMBps; }
+    public Double getMinThroughputMbps() { return minThroughputMBps; }
     public Duration getMaxPerTestTarget() { return maxPerTestTarget; }
     public String getSessionId() { return sessionId; }
 
@@ -286,6 +317,11 @@ public final class BenchmarkConfig {
         private final Set<ReportFormat> reportFormats =
                 new LinkedHashSet<>(Arrays.asList(ReportFormat.CSV, ReportFormat.JSON));
         private boolean embedCharts = false;
+
+        private WorkloadProfile workloadProfile = null;
+        private Double minIops = null;
+        private Double maxP99LatencyMs = null;
+        private Double minThroughputMBps = null;
 
         private Duration maxPerTestTarget = Duration.ofMinutes(10);
         private String sessionId = null;
@@ -347,6 +383,24 @@ public final class BenchmarkConfig {
         }
 
         public Builder embedCharts(boolean embed) { this.embedCharts = embed; return this; }
+
+        public Builder profile(WorkloadProfile profile) { this.workloadProfile = profile; return this; }
+        public Builder profile(String name) {
+            if (name == null) {
+                this.workloadProfile = null;
+                return this;
+            }
+            this.workloadProfile = WorkloadProfile.valueOf(name.trim().toUpperCase(Locale.ROOT));
+            return this;
+        }
+        public Builder workloadProfile(WorkloadProfile profile) { this.workloadProfile = profile; return this; }
+        public Builder workloadProfile(String name) { return profile(name); }
+
+        public Builder minIops(double value) { this.minIops = value; return this; }
+        public Builder maxP99LatencyMs(double value) { this.maxP99LatencyMs = value; return this; }
+        public Builder maxP99Ms(double value) { this.maxP99LatencyMs = value; return this; }
+        public Builder minThroughputMBps(double value) { this.minThroughputMBps = value; return this; }
+        public Builder minThroughputMbps(double value) { this.minThroughputMBps = value; return this; }
         public Builder maxPerTestTarget(Duration d) { this.maxPerTestTarget = d; return this; }
         public Builder sessionId(String id) { this.sessionId = id; return this; }
 

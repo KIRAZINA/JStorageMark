@@ -59,6 +59,10 @@ public final class Main {
         options.addOption(null, "block-sweep", true, "Comma-separated block sizes to sweep (e.g. 4K,8K,16K,32K,64K,128K,256K,512K,1M)");
         options.addOption(null, "compare", true, "Compare current run with baseline JSON report file");
         options.addOption(null, "version", false, "Print version and exit");
+        options.addOption("p", "profile", true, "Workload profile: DATABASE, STREAMING, LOGGING, OLTP");
+        options.addOption(null, "min-iops", true, "Minimum required IOPS SLA threshold");
+        options.addOption(null, "max-p99-ms", true, "Maximum allowed P99 latency in milliseconds SLA threshold");
+        options.addOption(null, "min-throughput-mbps", true, "Minimum required throughput in MB/s SLA threshold");
 
         CommandLineParser parser = new DefaultParser();
         HelpFormatter formatter = new HelpFormatter();
@@ -83,9 +87,65 @@ public final class Main {
             }
 
             long fileSize = parseFileSize(cmd.getOptionValue("s", String.valueOf(5L * 1024 * 1024 * 1024)));
-            int blockSize = parseInt("block size", cmd.getOptionValue("b", String.valueOf(128 * 1024)),
+            BenchmarkConfig.WorkloadProfile profile = null;
+            if (cmd.hasOption("p")) {
+                try {
+                    profile = BenchmarkConfig.WorkloadProfile.valueOf(
+                            cmd.getOptionValue("p").trim().toUpperCase(Locale.ROOT));
+                } catch (IllegalArgumentException e) {
+                    System.err.println("Error: Unknown profile: " + cmd.getOptionValue("p"));
+                    return 1;
+                }
+            }
+
+            int profileBlockSize = 128 * 1024;
+            int profileThreads = 4;
+            String profileTestTypes = null;
+            Integer profileMixedRatio = null;
+            if (profile != null) {
+                switch (profile) {
+                    case DATABASE:
+                        profileBlockSize = 8 * 1024;
+                        profileThreads = 8;
+                        profileTestTypes = "MIXED_RW";
+                        profileMixedRatio = 80;
+                        break;
+                    case STREAMING:
+                        profileBlockSize = 1024 * 1024;
+                        profileThreads = 2;
+                        profileTestTypes = "SEQ_READ";
+                        break;
+                    case LOGGING:
+                        profileBlockSize = 64 * 1024;
+                        profileThreads = 1;
+                        profileTestTypes = "SEQ_WRITE";
+                        break;
+                    case OLTP:
+                        profileBlockSize = 4 * 1024;
+                        profileThreads = 16;
+                        profileTestTypes = "MIXED_RW";
+                        profileMixedRatio = 70;
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            int blockSize = parseInt("block size",
+                    cmd.getOptionValue("b", String.valueOf(profile != null ? profileBlockSize : 128 * 1024)),
                     4 * 1024, 1 * 1024 * 1024);
-            int threads = parseInt("threads", cmd.getOptionValue("n", "4"), 1, 32);
+            // If profile default and -b not provided, use profile block size
+            if (!cmd.hasOption("b") && profile != null) {
+                blockSize = profileBlockSize;
+            }
+
+            int threads = parseInt("threads",
+                    cmd.getOptionValue("n", String.valueOf(profile != null ? profileThreads : 4)),
+                    1, 32);
+            if (!cmd.hasOption("n") && profile != null) {
+                threads = profileThreads;
+            }
+
             int iterations = parseInt("iterations", cmd.getOptionValue("i", "5"), 1, 100);
             int queueDepth = parseInt("queue depth", cmd.getOptionValue("q", "8"), 1, 1024);
 
@@ -110,9 +170,18 @@ public final class Main {
 
             if (cmd.hasOption("mr")) {
                 builder.mixedReadPercent(parseInt("mixed ratio", cmd.getOptionValue("mr"), 0, 100));
+            } else if (profileMixedRatio != null) {
+                builder.mixedReadPercent(profileMixedRatio);
             }
 
-            String[] testTypes = cmd.getOptionValue("t", "SEQ_READ,SEQ_WRITE").split(",");
+            String testTypesValue = cmd.getOptionValue("t");
+            if (testTypesValue == null && profileTestTypes != null) {
+                testTypesValue = profileTestTypes;
+            }
+            if (testTypesValue == null) {
+                testTypesValue = "SEQ_READ,SEQ_WRITE";
+            }
+            String[] testTypes = testTypesValue.split(",");
             for (String tt : testTypes) {
                 tt = tt.trim().toUpperCase(Locale.ROOT);
                 try {
@@ -123,7 +192,19 @@ public final class Main {
                 }
             }
 
-            builder.addReportFormat(BenchmarkConfig.ReportFormat.CSV);
+            if (profile != null) {
+                builder.profile(profile);
+            }
+
+            if (cmd.hasOption("min-iops")) {
+                builder.minIops(Double.parseDouble(cmd.getOptionValue("min-iops")));
+            }
+            if (cmd.hasOption("max-p99-ms")) {
+                builder.maxP99LatencyMs(Double.parseDouble(cmd.getOptionValue("max-p99-ms")));
+            }
+            if (cmd.hasOption("min-throughput-mbps")) {
+                builder.minThroughputMBps(Double.parseDouble(cmd.getOptionValue("min-throughput-mbps")));
+            }
             builder.addReportFormat(BenchmarkConfig.ReportFormat.JSON);
             if (cmd.hasOption("html")) {
                 builder.addReportFormat(BenchmarkConfig.ReportFormat.HTML);
@@ -195,6 +276,15 @@ public final class Main {
             if (baselineResults != null) {
                 generator.writeDiffReport(baselineResults, results);
                 System.out.println("Comparison report saved in: " + config.getTestDirectory());
+            }
+
+            // SLA threshold enforcement
+            List<String> slaFailures = evaluateSla(config, results);
+            if (!slaFailures.isEmpty()) {
+                for (String failure : slaFailures) {
+                    System.err.println("SLA FAILURE: " + failure);
+                }
+                return 2;
             }
 
             return 0;
@@ -300,6 +390,14 @@ public final class Main {
             System.err.println("Sweep finished with failed block sizes; N/A rows were written.");
             return 1;
         }
+
+        List<String> slaFailures = evaluateSla(baseConfig, allResults);
+        if (!slaFailures.isEmpty()) {
+            for (String failure : slaFailures) {
+                System.err.println("SLA FAILURE: " + failure);
+            }
+            return 2;
+        }
         return 0;
     }
 
@@ -371,6 +469,39 @@ public final class Main {
             throw new IllegalArgumentException(name + " must be between " + min + " and " + max);
         }
         return intValue;
+    }
+
+    static List<String> evaluateSla(BenchmarkConfig config, List<BenchmarkResult> results) {
+        List<String> failures = new ArrayList<>();
+        Double minIops = config.getMinIops();
+        Double maxP99Ms = config.getMaxP99LatencyMs();
+        Double minThroughput = config.getMinThroughputMBps();
+
+        if (minIops == null && maxP99Ms == null && minThroughput == null) {
+            return failures;
+        }
+        if (results == null) {
+            return failures;
+        }
+
+        for (BenchmarkResult r : results) {
+            if (minIops != null && r.iops() < minIops) {
+                failures.add(String.format(Locale.ROOT,
+                        "run=%s type=%s IOPS expected >= %.2f but was %.2f",
+                        r.runId(), r.testType(), minIops, r.iops()));
+            }
+            if (maxP99Ms != null && (r.p99LatencyNs() / 1_000_000.0) > maxP99Ms) {
+                failures.add(String.format(Locale.ROOT,
+                        "run=%s type=%s P99 latency expected <= %.2f ms but was %.2f ms",
+                        r.runId(), r.testType(), maxP99Ms, r.p99LatencyNs() / 1_000_000.0));
+            }
+            if (minThroughput != null && r.throughputMBps() < minThroughput) {
+                failures.add(String.format(Locale.ROOT,
+                        "run=%s type=%s throughput expected >= %.2f MB/s but was %.2f MB/s",
+                        r.runId(), r.testType(), minThroughput, r.throughputMBps()));
+            }
+        }
+        return failures;
     }
 
     static String formatBytes(long bytes) {

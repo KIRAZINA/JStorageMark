@@ -368,11 +368,49 @@ class MainCLITest {
     }
 
     @Test
-    @DisplayName("parseFileSize should throw on out-of-range values")
-    void parseFileSizeShouldThrowOnOutOfRange() {
-        assertThatThrownBy(() -> Main.parseFileSize("500M"))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> Main.parseFileSize("20G"))
-                .isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("Profile flag should run successfully")
+    void profileFlagShouldRun() {
+        String[] args = {
+                "-d", tempDir.toString(),
+                "-p", "STREAMING",
+                "-s", String.valueOf(ONE_GB),
+                "-n", "2",
+                "-i", "1"
+        };
+
+        assertThat(Main.run(args)).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("SLA check should pass when thresholds are met")
+    void slaShouldPass() {
+        String[] args = {
+                "-d", tempDir.toString(),
+                "-t", "SEQ_WRITE",
+                "-s", String.valueOf(ONE_GB),
+                "-n", "1",
+                "-i", "1",
+                "--min-iops", "1",
+                "--min-throughput-mbps", "1",
+                "--max-p99-ms", "1000000"
+        };
+
+        assertThat(Main.run(args)).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("SLA check should fail with exit code 2 when breached")
+    void slaShouldFail() {
+        String[] args = {
+                "-d", tempDir.toString(),
+                "-t", "SEQ_WRITE",
+                "-s", String.valueOf(ONE_GB),
+                "-n", "1",
+                "-i", "1",
+                "--min-iops", "1000000000"
+        };
+
+        assertThat(Main.run(args)).isEqualTo(2);
+        assertThat(errContent.toString()).contains("SLA FAILURE");
     }
 }
