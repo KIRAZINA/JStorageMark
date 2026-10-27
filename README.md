@@ -1,3 +1,5 @@
+[![JStorageMark CI](https://github.com/KIRAZINA/JStorageMark/actions/workflows/ci.yml/badge.svg)](https://github.com/KIRAZINA/JStorageMark/actions/workflows/ci.yml)
+
 # JStorageMark
 
 ## Overview
