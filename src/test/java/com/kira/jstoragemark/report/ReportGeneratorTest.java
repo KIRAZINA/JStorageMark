@@ -630,4 +630,27 @@ class ReportGeneratorTest {
                 .contains("regression")
                 .contains("Throughput (MB/s)");
     }
+
+    @Test
+    @DisplayName("Write HTML should embed SVG charts when charts requested")
+    void writeHtmlShouldEmbedCharts() throws IOException {
+        BenchmarkConfig htmlConfig = new BenchmarkConfig.Builder()
+                .testDirectory(tempDir)
+                .addTestType(BenchmarkConfig.TestType.SEQ_READ)
+                .addTestType(BenchmarkConfig.TestType.SEQ_WRITE)
+                .addReportFormat(BenchmarkConfig.ReportFormat.HTML)
+                .embedCharts(true)
+                .build();
+        BenchmarkPaths htmlPaths = new BenchmarkPaths(tempDir, htmlConfig.getSessionId());
+        ReportGenerator htmlGenerator = new ReportGenerator(htmlConfig, htmlPaths);
+
+        htmlGenerator.writeHtml(createSampleResults(), createSampleMetrics(), TEST_SYSTEM_INFO);
+
+        Path htmlPath = htmlPaths.reportFilePath("html");
+        String content = Files.readString(htmlPath);
+        assertThat(content)
+                .contains("<svg")
+                .contains("Latency Distribution Chart")
+                .contains("Throughput &amp; IOPS Comparison Chart");
+    }
 }

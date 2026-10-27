@@ -400,6 +400,8 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
     Histogram histogram = new Histogram(3600000000000L, 3);
     Instant start = Instant.now();
     long totalOps = 0;
+    long readOps = 0;
+    long writeOps = 0;
     long bytesProcessed = 0;
     long bytesRead = 0;
     long bytesWritten = 0;
@@ -435,6 +437,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
                 break;
               }
               bytesRead += read;
+              readOps++;
             } else {
               byte[] temp = new byte[bytesToProcess];
               rng.nextBytes(temp);
@@ -443,6 +446,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
               buffer.flip();
               int written = channel.write(buffer);
               bytesWritten += written;
+              writeOps++;
             }
 
             long endNs = System.nanoTime();
@@ -497,6 +501,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
               int written = channel.write(buffer);
               bytesWritten += written;
               bytesProcessed += written;
+              writeOps++;
             } else {
               buffer.clear();
               buffer.limit(bytesToProcess);
@@ -506,6 +511,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
               }
               bytesRead += read;
               bytesProcessed += read;
+              readOps++;
             }
 
             long endNs = System.nanoTime();
@@ -531,7 +537,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
 
     Instant end = Instant.now();
     return calculateResult(
-        runId, threadId, type, bytesProcessed, bytesRead, bytesWritten, start, end, totalOps,
+        runId, threadId, type, bytesProcessed, bytesRead, bytesWritten, readOps, writeOps, start, end, totalOps,
         histogram);
   }
 
@@ -554,6 +560,8 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
     Histogram histogram = new Histogram(3600000000000L, 3);
     AtomicLong bytesReadAcc = new AtomicLong();
     AtomicLong bytesWrittenAcc = new AtomicLong();
+    AtomicLong readOpsAcc = new AtomicLong();
+    AtomicLong writeOpsAcc = new AtomicLong();
     AtomicLong opsAcc = new AtomicLong();
 
     try (AsynchronousFileChannel channel = asyncChannelFactory.open(file)) {
@@ -628,6 +636,8 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
                 doWrite,
                 bytesReadAcc,
                 bytesWrittenAcc,
+                readOpsAcc,
+                writeOpsAcc,
                 opsAcc,
                 progressBytesProcessed,
                 System.nanoTime());
@@ -668,6 +678,8 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
           bytesProcessed,
           bytesReadAcc.get(),
           bytesWrittenAcc.get(),
+          readOpsAcc.get(),
+          writeOpsAcc.get(),
           start,
           end,
           opsAcc.get(),
@@ -743,6 +755,8 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
     private final boolean write;
     private final AtomicLong bytesRead;
     private final AtomicLong bytesWritten;
+    private final AtomicLong readOps;
+    private final AtomicLong writeOps;
     private final AtomicLong ops;
     private final AtomicLong progress;
     private final long startNs;
@@ -763,6 +777,8 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
         boolean write,
         AtomicLong bytesRead,
         AtomicLong bytesWritten,
+        AtomicLong readOps,
+        AtomicLong writeOps,
         AtomicLong ops,
         AtomicLong progress,
         long startNs) {
@@ -778,6 +794,8 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
       this.write = write;
       this.bytesRead = bytesRead;
       this.bytesWritten = bytesWritten;
+      this.readOps = readOps;
+      this.writeOps = writeOps;
       this.ops = ops;
       this.progress = progress;
       this.startNs = startNs;
@@ -843,6 +861,11 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
         histogram.recordValue(latencyNs);
       }
       ops.incrementAndGet();
+      if (write) {
+        writeOps.incrementAndGet();
+      } else {
+        readOps.incrementAndGet();
+      }
       finish();
     }
 
@@ -901,19 +924,14 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
       long bytesProcessed,
       long bytesRead,
       long bytesWritten,
+      long readOps,
+      long writeOps,
       Instant start,
       Instant end,
       long totalOps,
       Histogram histogram) {
 
     Duration elapsed = Duration.between(start, end);
-    long elapsedNanos = elapsed.toNanos();
-    double elapsedSeconds = elapsedNanos / 1_000_000_000.0;
-
-    double throughputMbps = (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds;
-    double avgLatencyMs = (elapsedNanos / 1_000_000.0) / totalOps;
-    double avgLatencyNs = (double) elapsedNanos / totalOps;
-    double iops = totalOps / elapsedSeconds;
 
     double p50 = histogram.getValueAtPercentile(50.0);
     double p95 = histogram.getValueAtPercentile(95.0);
@@ -924,22 +942,23 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
     String rid = String.format("run-%03d-thread-%02d", runId, threadId);
     String typeName = type != null ? type.name() : "";
     BenchmarkResult result =
-        new BenchmarkResult(
+        BenchmarkResult.fromCounts(
             rid,
             typeName,
-            bytesProcessed,
+            bytesRead,
+            bytesWritten,
+            readOps,
+            writeOps,
             elapsed,
-            elapsedNanos,
-            throughputMbps,
-            avgLatencyMs,
-            avgLatencyNs,
-            iops,
             end,
             p50,
             p95,
             p99,
             p999,
             maxLatencyNs);
+
+    double throughputMbps = result.throughputMBps();
+    double avgLatencyMs = result.avgLatencyMs();
 
     logger.debug(
         "Run {} completed: type={}, throughput={} MB/s, latency={} ms, p99={} ns",

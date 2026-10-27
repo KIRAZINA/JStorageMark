@@ -298,4 +298,24 @@ class BenchmarkResultTest {
         assertThat(result.timestamp()).isEqualTo(preciseTimestamp);
         assertThat(result.timestamp().getNano()).isEqualTo(123456789);
     }
+
+    @Test
+    @DisplayName("fromCounts should split read and write throughput and IOPS")
+    void fromCountsShouldSplitDirectionalMetrics() {
+        Instant ts = Instant.parse("2024-01-15T10:30:00Z");
+        Duration elapsed = Duration.ofSeconds(1);
+        long readBytes = 70L * 1024 * 1024;
+        long writeBytes = 30L * 1024 * 1024;
+
+        BenchmarkResult result = BenchmarkResult.fromCounts(
+                "run-mixed", "MIXED_RW", readBytes, writeBytes, 70, 30, elapsed, ts,
+                100.0, 200.0, 300.0, 400.0, 500L);
+
+        assertThat(result.readThroughputMBps()).isCloseTo(70.0, within(0.1));
+        assertThat(result.writeThroughputMBps()).isCloseTo(30.0, within(0.1));
+        assertThat(result.throughputMBps()).isCloseTo(100.0, within(0.1));
+        assertThat(result.readIops()).isCloseTo(70.0, within(0.1));
+        assertThat(result.writeIops()).isCloseTo(30.0, within(0.1));
+        assertThat(result.iops()).isCloseTo(100.0, within(0.1));
+    }
 }

@@ -43,7 +43,8 @@ public final class ReportGenerator implements IReportGenerator {
             writer.writeNext(new String[]{
                     "RunId", "TestType", "BytesProcessed", "ElapsedMs", "ElapsedNs",
                     "ThroughputMBps", "AvgLatencyMs", "AvgLatencyNs", "IOPS", "Timestamp",
-                    "P50LatencyNs", "P95LatencyNs", "P99LatencyNs", "P999LatencyNs", "MaxLatencyNs"
+                    "P50LatencyNs", "P95LatencyNs", "P99LatencyNs", "P999LatencyNs", "MaxLatencyNs",
+                    "ReadThroughputMBps", "WriteThroughputMBps", "ReadIOPS", "WriteIOPS"
             });
 
             for (BenchmarkResult r : results) {
@@ -62,7 +63,11 @@ public final class ReportGenerator implements IReportGenerator {
                         String.format(Locale.ROOT, "%.0f", r.p95LatencyNs()),
                         String.format(Locale.ROOT, "%.0f", r.p99LatencyNs()),
                         String.format(Locale.ROOT, "%.0f", r.p999LatencyNs()),
-                        String.valueOf(r.maxLatencyNs())
+                        String.valueOf(r.maxLatencyNs()),
+                        String.format(Locale.ROOT, "%.2f", r.readThroughputMBps()),
+                        String.format(Locale.ROOT, "%.2f", r.writeThroughputMBps()),
+                        String.format(Locale.ROOT, "%.2f", r.readIops()),
+                        String.format(Locale.ROOT, "%.2f", r.writeIops())
                 });
             }
             logger.info("CSV report written to {}", csvPath);
@@ -125,15 +130,20 @@ public final class ReportGenerator implements IReportGenerator {
 
             writer.write("<h2>Results</h2><table>\n");
             writer.write("<tr><th>RunId</th><th>TestType</th><th>Throughput (MB/s)</th>" +
-                    "<th>Latency (ms)</th><th>IOPS</th>" +
+                    "<th>Read (MB/s)</th><th>Write (MB/s)</th>" +
+                    "<th>Latency (ms)</th><th>IOPS</th><th>Read IOPS</th><th>Write IOPS</th>" +
                     "<th>p50 (ns)</th><th>p95 (ns)</th><th>p99 (ns)</th><th>p99.9 (ns)</th><th>Max (ns)</th></tr>\n");
 
             for (BenchmarkResult r : results) {
                 writer.write("<tr><td>" + StringEscapeUtils.escapeHtml4(r.runId()) + "</td><td>" +
                         StringEscapeUtils.escapeHtml4(r.testType()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.2f", r.throughputMBps()) +
+                        "</td><td>" + String.format(Locale.ROOT, "%.2f", r.readThroughputMBps()) +
+                        "</td><td>" + String.format(Locale.ROOT, "%.2f", r.writeThroughputMBps()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.2f", r.avgLatencyMs()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.2f", r.iops()) +
+                        "</td><td>" + String.format(Locale.ROOT, "%.2f", r.readIops()) +
+                        "</td><td>" + String.format(Locale.ROOT, "%.2f", r.writeIops()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.0f", r.p50LatencyNs()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.0f", r.p95LatencyNs()) +
                         "</td><td>" + String.format(Locale.ROOT, "%.0f", r.p99LatencyNs()) +
@@ -142,6 +152,11 @@ public final class ReportGenerator implements IReportGenerator {
                         "</td></tr>\n");
             }
             writer.write("</table>\n");
+
+            writer.write("<h2>Latency Distribution Chart</h2>\n");
+            writer.write(buildLatencyChart(results));
+            writer.write("<h2>Throughput &amp; IOPS Comparison Chart</h2>\n");
+            writer.write(buildThroughputIopsChart(results));
 
             writer.write("<h2>System Metrics</h2><table>\n");
             writer.write("<tr><th>Timestamp</th><th>CPU (%)</th><th>RAM (%)</th>" +
@@ -478,6 +493,242 @@ public final class ReportGenerator implements IReportGenerator {
                 StringEscapeUtils.escapeHtml4(testType),
                 StringEscapeUtils.escapeHtml4(metric),
                 baselineVal, currentVal, cssClass, change);
+    }
+
+    private static String escapeXml(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;");
+    }
+
+    private String buildLatencyChart(List<BenchmarkResult> results) {
+        List<String> types = new ArrayList<>();
+        for (BenchmarkResult r : results) {
+            String t = r.testType() == null ? "" : r.testType();
+            if (!types.contains(t)) {
+                types.add(t);
+            }
+        }
+        if (types.isEmpty()) {
+            return "<p>No latency data available.</p>\n";
+        }
+
+        // Aggregate per test type.
+        double[] p50 = new double[types.size()];
+        double[] p95 = new double[types.size()];
+        double[] p99 = new double[types.size()];
+        double[] p999 = new double[types.size()];
+        double[] max = new double[types.size()];
+        int[] counts = new int[types.size()];
+        for (BenchmarkResult r : results) {
+            String t = r.testType() == null ? "" : r.testType();
+            int idx = types.indexOf(t);
+            p50[idx] += r.p50LatencyNs();
+            p95[idx] += r.p95LatencyNs();
+            p99[idx] += r.p99LatencyNs();
+            p999[idx] += r.p999LatencyNs();
+            max[idx] += r.maxLatencyNs();
+            counts[idx]++;
+        }
+        double maxVal = 1.0;
+        for (int i = 0; i < types.size(); i++) {
+            if (counts[i] > 0) {
+                p50[i] /= counts[i];
+                p95[i] /= counts[i];
+                p99[i] /= counts[i];
+                p999[i] /= counts[i];
+                max[i] /= counts[i];
+            }
+            maxVal = Math.max(maxVal, Math.max(p50[i], Math.max(p95[i],
+                    Math.max(p99[i], Math.max(p999[i], max[i])))));
+        }
+
+        int width = 760;
+        int height = 360;
+        int marginL = 60;
+        int marginB = 60;
+        int marginT = 30;
+        int marginR = 20;
+        int plotW = width - marginL - marginR;
+        int plotH = height - marginT - marginB;
+        int groupW = plotW / types.size();
+        int barW = Math.max(4, groupW / 6);
+
+        StringBuilder svg = new StringBuilder();
+        svg.append("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"").append(width)
+                .append("\" height=\"").append(height).append("\" viewBox=\"0 0 ").append(width)
+                .append(" ").append(height).append("\" role=\"img\" aria-label=\"Latency distribution chart\">\n");
+        // axes
+        svg.append("<line x1=\"").append(marginL).append("\" y1=\"").append(marginT)
+                .append("\" x2=\"").append(marginL).append("\" y2=\"").append(height - marginB)
+                .append("\" stroke=\"#333\"/>\n");
+        svg.append("<line x1=\"").append(marginL).append("\" y1=\"").append(height - marginB)
+                .append("\" x2=\"").append(width - marginR).append("\" y2=\"").append(height - marginB)
+                .append("\" stroke=\"#333\"/>\n");
+
+        String[] labels = {"P50", "P95", "P99", "P99.9", "Max"};
+        String[] colors = {"#4CAF50", "#2196F3", "#FF9800", "#9C27B0", "#F44336"};
+        double[] vals = new double[5];
+
+        for (int i = 0; i < types.size(); i++) {
+            vals[0] = p50[i]; vals[1] = p95[i]; vals[2] = p99[i]; vals[3] = p999[i]; vals[4] = max[i];
+            int gx = marginL + i * groupW + groupW / 2;
+            for (int j = 0; j < 5; j++) {
+                int bh = (int) Math.round(vals[j] / maxVal * plotH);
+                int x = gx - (5 * barW) / 2 + j * barW;
+                int y = height - marginB - bh;
+                svg.append("<rect x=\"").append(x).append("\" y=\"").append(y)
+                        .append("\" width=\"").append(barW - 1).append("\" height=\"").append(bh)
+                        .append("\" fill=\"").append(colors[j]).append("\"/>\n");
+            }
+            svg.append("<text x=\"").append(gx).append("\" y=\"").append(height - marginB + 15)
+                    .append("\" text-anchor=\"middle\" font-size=\"11\">")
+                    .append(escapeXml(types.get(i))).append("</text>\n");
+        }
+
+        // legend
+        int lx = marginL;
+        int ly = marginT - 15;
+        for (int j = 0; j < 5; j++) {
+            svg.append("<rect x=\"").append(lx + j * 120).append("\" y=\"").append(ly)
+                    .append("\" width=\"12\" height=\"12\" fill=\"").append(colors[j]).append("\"/>\n");
+            svg.append("<text x=\"").append(lx + j * 120 + 16).append("\" y=\"").append(ly + 11)
+                    .append("\" font-size=\"11\">").append(labels[j]).append("</text>\n");
+        }
+        svg.append("<text x=\"").append(marginL - 10).append("\" y=\"").append(marginT - 5)
+                .append("\" text-anchor=\"end\" font-size=\"10\">ns</text>\n");
+        svg.append("</svg>\n");
+        return svg.toString();
+    }
+
+    private String buildThroughputIopsChart(List<BenchmarkResult> results) {
+        List<String> types = new ArrayList<>();
+        for (BenchmarkResult r : results) {
+            String t = r.testType() == null ? "" : r.testType();
+            if (!types.contains(t)) {
+                types.add(t);
+            }
+        }
+        if (types.isEmpty()) {
+            return "<p>No throughput data available.</p>\n";
+        }
+
+        double[] tRead = new double[types.size()];
+        double[] tWrite = new double[types.size()];
+        double[] tComb = new double[types.size()];
+        double[] iRead = new double[types.size()];
+        double[] iWrite = new double[types.size()];
+        double[] iComb = new double[types.size()];
+        int[] counts = new int[types.size()];
+        for (BenchmarkResult r : results) {
+            String t = r.testType() == null ? "" : r.testType();
+            int idx = types.indexOf(t);
+            tRead[idx] += r.readThroughputMBps();
+            tWrite[idx] += r.writeThroughputMBps();
+            tComb[idx] += r.throughputMBps();
+            iRead[idx] += r.readIops();
+            iWrite[idx] += r.writeIops();
+            iComb[idx] += r.iops();
+            counts[idx]++;
+        }
+        double maxT = 1.0;
+        double maxI = 1.0;
+        for (int i = 0; i < types.size(); i++) {
+            if (counts[i] > 0) {
+                tRead[i] /= counts[i];
+                tWrite[i] /= counts[i];
+                tComb[i] /= counts[i];
+                iRead[i] /= counts[i];
+                iWrite[i] /= counts[i];
+                iComb[i] /= counts[i];
+            }
+            maxT = Math.max(maxT, Math.max(tRead[i], Math.max(tWrite[i], tComb[i])));
+            maxI = Math.max(maxI, Math.max(iRead[i], Math.max(iWrite[i], iComb[i])));
+        }
+
+        int width = 760;
+        int height = 420;
+        int marginL = 60;
+        int marginR = 20;
+        int topH = 200;
+        int botTop = 230;
+        int botH = 160;
+        int plotW = width - marginL - marginR;
+        int groupW = plotW / types.size();
+        int barW = Math.max(4, groupW / 4);
+
+        StringBuilder svg = new StringBuilder();
+        svg.append("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"").append(width)
+                .append("\" height=\"").append(height).append("\" viewBox=\"0 0 ").append(width)
+                .append(" ").append(height).append("\" role=\"img\" aria-label=\"Throughput and IOPS comparison chart\">\n");
+
+        // Throughput panel
+        svg.append("<text x=\"").append(marginL).append("\" y=\"15\" font-size=\"13\" font-weight=\"bold\">Throughput (MB/s)</text>\n");
+        svg.append("<line x1=\"").append(marginL).append("\" y1=\"20\" x2=\"").append(marginL)
+                .append("\" y2=\"").append(topH).append("\" stroke=\"#333\"/>\n");
+        svg.append("<line x1=\"").append(marginL).append("\" y1=\"").append(topH)
+                .append("\" x2=\"").append(width - marginR).append("\" y2=\"").append(topH)
+                .append("\" stroke=\"#333\"/>\n");
+        String[] tLabels = {"Read", "Write", "Combined"};
+        String[] tColors = {"#4CAF50", "#F44336", "#2196F3"};
+        double[] tVals = new double[3];
+        for (int i = 0; i < types.size(); i++) {
+            tVals[0] = tRead[i]; tVals[1] = tWrite[i]; tVals[2] = tComb[i];
+            int gx = marginL + i * groupW + groupW / 2;
+            for (int j = 0; j < 3; j++) {
+                int bh = (int) Math.round(tVals[j] / maxT * (topH - 25));
+                int x = gx - (3 * barW) / 2 + j * barW;
+                int y = topH - bh;
+                svg.append("<rect x=\"").append(x).append("\" y=\"").append(y)
+                        .append("\" width=\"").append(barW - 1).append("\" height=\"").append(bh)
+                        .append("\" fill=\"").append(tColors[j]).append("\"/>\n");
+            }
+            svg.append("<text x=\"").append(gx).append("\" y=\"").append(topH + 14)
+                    .append("\" text-anchor=\"middle\" font-size=\"10\">")
+                    .append(escapeXml(types.get(i))).append("</text>\n");
+        }
+
+        // IOPS panel
+        svg.append("<text x=\"").append(marginL).append("\" y=\"").append(botTop - 5)
+                .append("\" font-size=\"13\" font-weight=\"bold\">IOPS</text>\n");
+        svg.append("<line x1=\"").append(marginL).append("\" y1=\"").append(botTop)
+                .append("\" x2=\"").append(marginL).append("\" y2=\"").append(botTop + botH)
+                .append("\" stroke=\"#333\"/>\n");
+        svg.append("<line x1=\"").append(marginL).append("\" y1=\"").append(botTop + botH)
+                .append("\" x2=\"").append(width - marginR).append("\" y2=\"").append(botTop + botH)
+                .append("\" stroke=\"#333\"/>\n");
+        double[] iVals = new double[3];
+        for (int i = 0; i < types.size(); i++) {
+            iVals[0] = iRead[i]; iVals[1] = iWrite[i]; iVals[2] = iComb[i];
+            int gx = marginL + i * groupW + groupW / 2;
+            for (int j = 0; j < 3; j++) {
+                int bh = (int) Math.round(iVals[j] / maxI * (botH - 10));
+                int x = gx - (3 * barW) / 2 + j * barW;
+                int y = botTop + botH - bh;
+                svg.append("<rect x=\"").append(x).append("\" y=\"").append(y)
+                        .append("\" width=\"").append(barW - 1).append("\" height=\"").append(bh)
+                        .append("\" fill=\"").append(tColors[j]).append("\"/>\n");
+            }
+            svg.append("<text x=\"").append(gx).append("\" y=\"").append(botTop + botH + 14)
+                    .append("\" text-anchor=\"middle\" font-size=\"10\">")
+                    .append(escapeXml(types.get(i))).append("</text>\n");
+        }
+
+        // legend
+        int ly = height - 10;
+        for (int j = 0; j < 3; j++) {
+            svg.append("<rect x=\"").append(marginL + j * 120).append("\" y=\"").append(ly - 10)
+                    .append("\" width=\"12\" height=\"12\" fill=\"").append(tColors[j]).append("\"/>\n");
+            svg.append("<text x=\"").append(marginL + j * 120 + 16).append("\" y=\"").append(ly)
+                    .append("\" font-size=\"11\">").append(tLabels[j]).append("</text>\n");
+        }
+        svg.append("</svg>\n");
+        return svg.toString();
     }
 
     private static String formatBytes(long bytes) {
