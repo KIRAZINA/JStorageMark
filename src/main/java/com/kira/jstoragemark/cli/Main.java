@@ -5,8 +5,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -148,6 +150,7 @@ public final class Main {
             logger.info("Starting benchmark with configuration: {}", config);
             System.out.println("Starting JStorageMark benchmark...");
             System.out.println("Test directory: " + config.getTestDirectory());
+            System.out.println("Session directory: " + paths.getSessionDir());
             System.out.println("Test types: " + config.getTestTypes());
             System.out.println("File size: " + formatBytes(config.getFileSizeBytes()));
             System.out.println("Threads: " + config.getThreads());
@@ -183,6 +186,9 @@ public final class Main {
                 System.out.printf(Locale.ROOT, "Average latency: %.2f ms%n", avgLatency);
             }
             System.out.println("Reports saved in: " + config.getTestDirectory());
+            System.out.println(config.isRetainTestFiles()
+                    ? "Test data retained in: " + paths.getSessionDir()
+                    : "Test data cleaned from: " + paths.getSessionDir());
             logger.info("Benchmark completed successfully in {} seconds", duration / 1000.0);
 
             // Generate diff report if baseline was provided
@@ -228,7 +234,7 @@ public final class Main {
             logger.error("Benchmark interrupted", e);
             Thread.currentThread().interrupt();
             return 1;
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             System.err.println("Error: Unexpected error - " + e.getMessage());
             logger.error("Unexpected error", e);
             return 1;
@@ -237,47 +243,63 @@ public final class Main {
 
     private static int runBlockSweep(Path dir, BenchmarkConfig baseConfig,
                                       List<Integer> blockSizes,
-                                      List<BenchmarkResult> baselineResults) throws Exception {
+                                      List<BenchmarkResult> baselineResults)
+            throws IOException, InterruptedException {
+        Map<Integer, List<BenchmarkResult>> resultsByBlockSize = new LinkedHashMap<>();
         List<BenchmarkResult> allResults = new ArrayList<>();
-        ReportGenerator lastGenerator = null;
+        ReportGenerator generator = new ReportGenerator(baseConfig,
+                new BenchmarkPaths(baseConfig.getTestDirectory(), baseConfig.getSessionId()));
+        boolean anyFailure = false;
 
         for (int bSize : blockSizes) {
             System.out.println("=== Testing block size: " + formatBytes(bSize) + " ===");
-            BenchmarkConfig config = new BenchmarkConfig.Builder()
-                    .testDirectory(baseConfig.getTestDirectory())
-                    .testTypes(baseConfig.getTestTypes())
-                    .fileSizeBytes(baseConfig.getFileSizeBytes())
-                    .blockSizeBytes(bSize)
-                    .threads(baseConfig.getThreads())
-                    .iterations(baseConfig.getIterations())
-                    .queueDepth(baseConfig.getQueueDepth())
-                    .verbosity(baseConfig.getVerbosity())
-                    .retainTestFiles(baseConfig.isRetainTestFiles())
-                    .forceSync(baseConfig.isForceSync())
-                    .syncEveryNBlocks(baseConfig.getSyncEveryNBlocks())
-                    .preallocateFiles(baseConfig.isPreallocateFiles())
-                    .useDirectBuffer(baseConfig.isUseDirectBuffer())
-                    .mixedReadPercent(baseConfig.getMixedReadPercent())
-                    .reportFormats(baseConfig.getReportFormats())
-                    .build();
+            List<BenchmarkResult> blockResults = List.of();
+            try {
+                BenchmarkConfig config = new BenchmarkConfig.Builder()
+                        .testDirectory(baseConfig.getTestDirectory())
+                        .testTypes(baseConfig.getTestTypes())
+                        .fileSizeBytes(baseConfig.getFileSizeBytes())
+                        .blockSizeBytes(bSize)
+                        .threads(baseConfig.getThreads())
+                        .iterations(baseConfig.getIterations())
+                        .queueDepth(baseConfig.getQueueDepth())
+                        .verbosity(baseConfig.getVerbosity())
+                        .retainTestFiles(baseConfig.isRetainTestFiles())
+                        .forceSync(baseConfig.isForceSync())
+                        .syncEveryNBlocks(baseConfig.getSyncEveryNBlocks())
+                        .preallocateFiles(baseConfig.isPreallocateFiles())
+                        .useDirectBuffer(baseConfig.isUseDirectBuffer())
+                        .mixedReadPercent(baseConfig.getMixedReadPercent())
+                        .reportFormats(baseConfig.getReportFormats())
+                        .build();
 
-            BenchmarkPaths paths = new BenchmarkPaths(config.getTestDirectory(), config.getSessionId());
-            BenchmarkRunner runner = new BenchmarkRunner(config, paths);
-            runner.startMetricsPolling();
-            allResults.addAll(runner.runAll());
-            lastGenerator = new ReportGenerator(config, paths);
+                BenchmarkPaths paths = new BenchmarkPaths(config.getTestDirectory(), config.getSessionId());
+                System.out.println("Session directory: " + paths.getSessionDir());
+                BenchmarkRunner runner = new BenchmarkRunner(config, paths);
+                runner.startMetricsPolling();
+                blockResults = runner.runAll();
+            } catch (IOException | RuntimeException e) {
+                anyFailure = true;
+                System.err.println("Block size " + formatBytes(bSize)
+                        + " failed: " + e.getMessage());
+                logger.error("Block size {} failed; continuing with remaining sizes", bSize, e);
+            }
+            resultsByBlockSize.put(bSize, blockResults);
+            allResults.addAll(blockResults);
         }
 
-        if (lastGenerator != null) {
-            lastGenerator.writeSweepReport(allResults, blockSizes);
-            System.out.println("\nSweep report saved in: " + baseConfig.getTestDirectory());
-        }
+        generator.writeSweepReport(blockSizes, resultsByBlockSize);
+        System.out.println("\nSweep report saved in: " + baseConfig.getTestDirectory());
 
-        if (baselineResults != null && lastGenerator != null) {
-            lastGenerator.writeDiffReport(baselineResults, allResults);
+        if (baselineResults != null) {
+            generator.writeDiffReport(baselineResults, allResults);
             System.out.println("Comparison report saved in: " + baseConfig.getTestDirectory());
         }
 
+        if (anyFailure) {
+            System.err.println("Sweep finished with failed block sizes; N/A rows were written.");
+            return 1;
+        }
         return 0;
     }
 

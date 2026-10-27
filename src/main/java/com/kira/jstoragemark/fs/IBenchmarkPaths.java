@@ -14,5 +14,19 @@ public interface IBenchmarkPaths {
     void cleanupSessionFiles(boolean retain);
     String header();
     Path getBaseDir();
+
+    /**
+     * Returns the isolated directory that holds this session's test payload.
+     *
+     * <p>Defaults to the base directory for backward compatibility with existing implementations.
+     * The standard {@link BenchmarkPaths} implementation always returns a dedicated child
+     * directory, so cleanup can never touch unrelated files in the base directory.
+     *
+     * @return directory containing only files created by this session
+     */
+    default Path getSessionDir() {
+        return getBaseDir();
+    }
+
     String getSessionId();
 }

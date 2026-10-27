@@ -6,8 +6,11 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 import org.apache.commons.text.StringEscapeUtils;
 import org.slf4j.Logger;
@@ -164,7 +167,44 @@ public final class ReportGenerator implements IReportGenerator {
         }
     }
 
-    public void writeSweepReport(List<BenchmarkResult> results, List<Integer> blockSizes) throws IOException {
+    /**
+     * Writes the block-size sweep report from one flat result list.
+     *
+     * <p>Results are grouped by run id. {@code BenchmarkRunner} restarts run numbering at 1 for
+     * every block-size run, so a run number that does not advance marks the start of the next
+     * block. Results from the threads of one run share the same run number and therefore stay
+     * together.
+     *
+     * <p>A flat list carries no explicit block identity. If a block failed entirely, the remaining
+     * groups cannot be located with certainty, so callers that collect results per block should use
+     * {@link #writeSweepReport(List, Map)} instead. This overload remains for backward
+     * compatibility and never throws due to uneven input.
+     *
+     * @param results flat result list in execution order
+     * @param blockSizes requested block sizes in execution order
+     * @throws IOException when the report cannot be written
+     */
+    @Override
+    public void writeSweepReport(List<BenchmarkResult> results, List<Integer> blockSizes)
+            throws IOException {
+        writeSweepReport(blockSizes, groupResultsByBlockSize(results, blockSizes));
+    }
+
+    /**
+     * Writes the block-size sweep report from results grouped explicitly by block size.
+     *
+     * <p>Each requested block size contributes at least one row: one data row per result when
+     * results exist, otherwise a single {@code N/A} row. Columns therefore remain aligned when a
+     * block size failed, produced no results, or is missing from the map entirely.
+     *
+     * @param blockSizes requested block sizes in execution order
+     * @param resultsByBlockSize results keyed by block size; absent keys are treated as empty
+     * @throws IOException when the report cannot be written
+     */
+    @Override
+    public void writeSweepReport(List<Integer> blockSizes,
+                                 Map<Integer, List<BenchmarkResult>> resultsByBlockSize)
+            throws IOException {
         Path csvPath = paths.reportFilePath("sweep.csv");
         try (CSVWriter writer = new CSVWriter(
                 new OutputStreamWriter(Files.newOutputStream(csvPath), StandardCharsets.UTF_8))) {
@@ -174,25 +214,190 @@ public final class ReportGenerator implements IReportGenerator {
                     "P95LatencyNs", "P99LatencyNs", "P999LatencyNs", "MaxLatencyNs"
             });
 
-            for (int i = 0; i < results.size(); i++) {
-                BenchmarkResult r = results.get(i);
-                int blockSize = blockSizes.get(i / Math.max(1, results.size() / blockSizes.size()));
-                writer.writeNext(new String[]{
-                        String.valueOf(blockSize),
-                        String.format(Locale.ROOT, "%.2f", r.throughputMBps()),
-                        String.format(Locale.ROOT, "%.2f", r.iops()),
-                        String.format(Locale.ROOT, "%.0f", r.avgLatencyNs()),
-                        String.format(Locale.ROOT, "%.0f", r.p50LatencyNs()),
-                        String.format(Locale.ROOT, "%.0f", r.p95LatencyNs()),
-                        String.format(Locale.ROOT, "%.0f", r.p99LatencyNs()),
-                        String.format(Locale.ROOT, "%.0f", r.p999LatencyNs()),
-                        String.valueOf(r.maxLatencyNs())
-                });
+            for (Integer blockSize : distinctBlockSizes(blockSizes)) {
+                List<BenchmarkResult> blockResults = resultsByBlockSize == null
+                        ? null
+                        : resultsByBlockSize.get(blockSize);
+                if (blockResults == null || blockResults.isEmpty()) {
+                    writer.writeNext(missingBlockRow(blockSize));
+                } else {
+                    boolean wroteAny = false;
+                    for (BenchmarkResult result : blockResults) {
+                        if (result != null) {
+                            writer.writeNext(sweepRow(blockSize, result));
+                            wroteAny = true;
+                        }
+                    }
+                    if (!wroteAny) {
+                        writer.writeNext(missingBlockRow(blockSize));
+                    }
+                }
             }
             logger.info("Sweep report written to {}", csvPath);
         } catch (IOException e) {
             logger.error("Failed to write sweep report", e);
             throw e;
+        }
+    }
+
+    /**
+     * Returns the requested block sizes in order, without duplicates or nulls.
+     *
+     * @param blockSizes configured block sizes; may be null
+     * @return distinct block sizes in execution order
+     */
+    private static List<Integer> distinctBlockSizes(List<Integer> blockSizes) {
+        List<Integer> distinct = new ArrayList<>();
+        if (blockSizes == null) {
+            return distinct;
+        }
+        for (Integer blockSize : blockSizes) {
+            if (blockSize != null && !distinct.contains(blockSize)) {
+                distinct.add(blockSize);
+            }
+        }
+        return distinct;
+    }
+
+    /**
+     * Builds the CSV row used when a block size produced no benchmark results.
+     *
+     * @param blockSize block size that failed or was skipped
+     * @return a full-width row of {@code N/A} values
+     */
+    private static String[] missingBlockRow(Integer blockSize) {
+        return new String[]{
+                String.valueOf(blockSize),
+                "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
+        };
+    }
+
+    /**
+     * Builds one sweep CSV row, keeping the existing column order.
+     *
+     * @param blockSize block size associated with the result
+     * @param result measured result
+     * @return the formatted row
+     */
+    private static String[] sweepRow(Integer blockSize, BenchmarkResult result) {
+        return new String[]{
+                String.valueOf(blockSize),
+                String.format(Locale.ROOT, "%.2f", result.throughputMBps()),
+                String.format(Locale.ROOT, "%.2f", result.iops()),
+                String.format(Locale.ROOT, "%.0f", result.avgLatencyNs()),
+                String.format(Locale.ROOT, "%.0f", result.p50LatencyNs()),
+                String.format(Locale.ROOT, "%.0f", result.p95LatencyNs()),
+                String.format(Locale.ROOT, "%.0f", result.p99LatencyNs()),
+                String.format(Locale.ROOT, "%.0f", result.p999LatencyNs()),
+                String.valueOf(result.maxLatencyNs())
+        };
+    }
+
+    /**
+     * Groups a legacy flat result list into per-block buckets using run-id boundaries.
+     *
+     * <p>Within one block-size run, iteration numbers increase and thread numbers increase. A new
+     * block therefore starts when the run number decreases, or when the run number stays the same
+     * but the thread number does not increase (the next block restarts at thread 0). This works for
+     * single-iteration sweeps as well as multi-iteration ones.
+     *
+     * <p>The first group maps to the first requested block size. If a flat list contains more run
+     * groups than block sizes, extra results stay attached to the last block size rather than being
+     * discarded; a warning records the inconsistency.
+     *
+     * @param results flat result list in execution order; may be null
+     * @param blockSizes requested block sizes in execution order
+     * @return ordered map with one bucket per requested block size
+     */
+    private static Map<Integer, List<BenchmarkResult>> groupResultsByBlockSize(
+            List<BenchmarkResult> results, List<Integer> blockSizes) {
+        List<Integer> orderedBlockSizes = distinctBlockSizes(blockSizes);
+        Map<Integer, List<BenchmarkResult>> grouped = new LinkedHashMap<>();
+        for (Integer blockSize : orderedBlockSizes) {
+            grouped.put(blockSize, new ArrayList<>());
+        }
+        if (results == null || results.isEmpty() || orderedBlockSizes.isEmpty()) {
+            return grouped;
+        }
+
+        int blockIndex = 0;
+        int previousRunNumber = Integer.MIN_VALUE;
+        int previousThreadNumber = Integer.MIN_VALUE;
+        boolean overflowLogged = false;
+
+        for (BenchmarkResult result : results) {
+            if (result == null) {
+                continue;
+            }
+            String runId = result.runId();
+            int runNumber = parseRunNumber(runId);
+            int threadNumber = parseThreadNumber(runId);
+            boolean startsNewBlock = runNumber >= 0
+                    && previousRunNumber != Integer.MIN_VALUE
+                    && (runNumber < previousRunNumber
+                        || (runNumber == previousRunNumber
+                            && threadNumber <= previousThreadNumber));
+            if (startsNewBlock) {
+                blockIndex++;
+            }
+            if (runNumber >= 0) {
+                previousRunNumber = runNumber;
+                previousThreadNumber = threadNumber;
+            }
+
+            if (blockIndex >= orderedBlockSizes.size()) {
+                if (!overflowLogged) {
+                    logger.warn("Sweep results contain more run groups than block sizes; "
+                            + "extra rows are attached to the last block size");
+                    overflowLogged = true;
+                }
+                blockIndex = orderedBlockSizes.size() - 1;
+            }
+            grouped.get(orderedBlockSizes.get(blockIndex)).add(result);
+        }
+        return grouped;
+    }
+
+    /**
+     * Extracts the numeric run counter from ids such as {@code run-003-thread-01}.
+     *
+     * @param runId result run id
+     * @return parsed run number, or {@code -1} when the id is absent or unexpected
+     */
+    private static int parseRunNumber(String runId) {
+        if (runId == null || !runId.startsWith("run-")) {
+            return -1;
+        }
+        int start = "run-".length();
+        int end = runId.indexOf('-', start);
+        String digits = end < 0 ? runId.substring(start) : runId.substring(start, end);
+        try {
+            return Integer.parseInt(digits);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Extracts the thread counter from ids such as {@code run-003-thread-01}.
+     *
+     * @param runId result run id
+     * @return parsed thread number, or {@code -1} when the id has no thread suffix
+     */
+    private static int parseThreadNumber(String runId) {
+        if (runId == null) {
+            return -1;
+        }
+        String marker = "-thread-";
+        int index = runId.indexOf(marker);
+        if (index < 0) {
+            return -1;
+        }
+        String digits = runId.substring(index + marker.length());
+        try {
+            return Integer.parseInt(digits);
+        } catch (NumberFormatException e) {
+            return -1;
         }
     }
 

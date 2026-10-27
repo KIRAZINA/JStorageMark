@@ -5,9 +5,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -23,6 +26,7 @@ import com.kira.jstoragemark.config.BenchmarkConfig;
 import com.kira.jstoragemark.fs.BenchmarkPaths;
 import com.kira.jstoragemark.metrics.MetricsSnapshot;
 import com.kira.jstoragemark.result.BenchmarkResult;
+import com.opencsv.CSVReader;
 
 class ReportGeneratorTest {
 
@@ -423,6 +427,174 @@ class ReportGeneratorTest {
                 .contains("BlockSize")
                 .contains("ThroughputMBps")
                 .contains("P99LatencyNs");
+    }
+
+    @Test
+    @DisplayName("Write sweep report should align every result with its block size")
+    void writeSweepReportShouldAlignSuccessfulBlocks() throws IOException {
+        List<Integer> blockSizes = Arrays.asList(4096, 8192, 16384);
+        Map<Integer, List<BenchmarkResult>> resultsByBlockSize = new LinkedHashMap<>();
+        resultsByBlockSize.put(4096, blockResults(1));
+        resultsByBlockSize.put(8192, blockResults(1));
+        resultsByBlockSize.put(16384, blockResults(1));
+
+        generator.writeSweepReport(blockSizes, resultsByBlockSize);
+
+        List<String[]> rows = readSweepRows();
+        assertThat(rows).hasSize(1 + blockSizes.size() * 2);
+        assertThat(rows.get(0)).containsExactly(
+                "BlockSize", "ThroughputMBps", "IOPS", "AvgLatencyNs", "P50LatencyNs",
+                "P95LatencyNs", "P99LatencyNs", "P999LatencyNs", "MaxLatencyNs");
+        for (int i = 1; i < rows.size(); i++) {
+            assertThat(rows.get(i)).hasSize(9);
+            int expectedBlockSize = blockSizes.get((i - 1) / 2);
+            assertThat(rows.get(i)[0]).isEqualTo(String.valueOf(expectedBlockSize));
+        }
+    }
+
+    @Test
+    @DisplayName("Write sweep report should emit N/A rows for missing or empty blocks")
+    void writeSweepReportShouldHandlePartialSweep() throws IOException {
+        List<Integer> blockSizes = Arrays.asList(4096, 8192, 16384);
+        Map<Integer, List<BenchmarkResult>> resultsByBlockSize = new LinkedHashMap<>();
+        resultsByBlockSize.put(4096, blockResults(1));
+        resultsByBlockSize.put(8192, Collections.emptyList());
+        // 16384 is absent entirely, simulating a block that never produced results.
+
+        generator.writeSweepReport(blockSizes, resultsByBlockSize);
+
+        List<String[]> rows = readSweepRows();
+        assertThat(rows).hasSize(1 + 2 + 1 + 1);
+        assertThat(rows.get(1)[0]).isEqualTo("4096");
+        assertThat(rows.get(2)[0]).isEqualTo("4096");
+        assertMissingBlockRow(rows.get(3), "8192");
+        assertMissingBlockRow(rows.get(4), "16384");
+    }
+
+    @Test
+    @DisplayName("Write sweep report should render every block as N/A when all blocks fail")
+    void writeSweepReportShouldHandleAllBlocksFailing() throws IOException {
+        List<Integer> blockSizes = Arrays.asList(4096, 8192, 16384);
+
+        generator.writeSweepReport(blockSizes, new LinkedHashMap<>());
+
+        List<String[]> rows = readSweepRows();
+        assertThat(rows).hasSize(1 + blockSizes.size());
+        for (int i = 1; i < rows.size(); i++) {
+            assertMissingBlockRow(rows.get(i), String.valueOf(blockSizes.get(i - 1)));
+        }
+    }
+
+    @Test
+    @DisplayName("Write sweep report should ignore result groups outside the requested sweep")
+    void writeSweepReportShouldIgnoreUnknownBlocks() throws IOException {
+        Map<Integer, List<BenchmarkResult>> resultsByBlockSize = new LinkedHashMap<>();
+        resultsByBlockSize.put(4096, blockResults(1));
+        resultsByBlockSize.put(999999, blockResults(1));
+
+        generator.writeSweepReport(List.of(4096), resultsByBlockSize);
+
+        assertThat(readSweepRows()).hasSize(1 + 2);
+    }
+
+    @Test
+    @DisplayName("Legacy sweep input should group by run-id boundaries, not index arithmetic")
+    void legacySweepReportShouldGroupByRunBoundaries() throws IOException {
+        List<Integer> blockSizes = Arrays.asList(4096, 8192);
+        List<BenchmarkResult> flat = new ArrayList<>();
+        flat.addAll(blockResults(1));   // first block, single iteration
+        flat.addAll(blockResults(1));   // second block restarts numbering at run 1
+        flat.addAll(blockResults(2));   // second block, second iteration
+
+        generator.writeSweepReport(flat, blockSizes);
+
+        List<String[]> rows = readSweepRows();
+        assertThat(rows).hasSize(1 + 6);
+        assertThat(rows.subList(1, rows.size()))
+                .extracting(row -> row[0])
+                .containsExactly("4096", "4096", "8192", "8192", "8192", "8192");
+    }
+
+    @Test
+    @DisplayName("Legacy sweep input should not throw when results outnumber block sizes")
+    void legacySweepReportShouldHandleMoreResultsThanBlockSizes() throws IOException {
+        List<BenchmarkResult> flat = new ArrayList<>();
+        flat.addAll(blockResults(1));
+        flat.addAll(blockResults(1));
+        flat.addAll(blockResults(1));
+
+        generator.writeSweepReport(flat, List.of(4096));
+
+        List<String[]> rows = readSweepRows();
+        assertThat(rows).hasSize(1 + 6);
+        assertThat(rows.subList(1, rows.size())).allSatisfy(row -> {
+            assertThat(row).hasSize(9);
+            assertThat(row[0]).isEqualTo("4096");
+        });
+    }
+
+    @Test
+    @DisplayName("Legacy sweep input with uneven results keeps rows aligned and never throws")
+    void legacySweepReportShouldHandleUnevenResults() throws IOException {
+        List<BenchmarkResult> flat = new ArrayList<>();
+        // First block: two runs (the second only partially completed).
+        flat.add(sweepResult("run-001-thread-00", 100.0));
+        flat.add(sweepResult("run-001-thread-01", 110.0));
+        flat.add(sweepResult("run-002-thread-00", 120.0));
+        // Second block: numbering restarts at run 1 with two results.
+        flat.add(sweepResult("run-001-thread-00", 130.0));
+        flat.add(sweepResult("run-001-thread-01", 140.0));
+
+        generator.writeSweepReport(flat, Arrays.asList(4096, 8192));
+
+        List<String[]> rows = readSweepRows();
+        assertThat(rows).hasSize(1 + 5);
+        assertThat(rows.subList(1, rows.size()))
+                .extracting(row -> row[0])
+                .containsExactly("4096", "4096", "4096", "8192", "8192");
+        assertThat(rows.subList(1, rows.size())).allSatisfy(row -> assertThat(row).hasSize(9));
+    }
+
+    @Test
+    @DisplayName("Sweep report should tolerate empty inputs")
+    void writeSweepReportShouldTolerateEmptyInputs() throws IOException {
+        generator.writeSweepReport(createSampleResults(), Collections.emptyList());
+        assertThat(readSweepRows()).hasSize(1);
+
+        generator.writeSweepReport(Collections.<Integer>emptyList(), new LinkedHashMap<>());
+        assertThat(readSweepRows()).hasSize(1);
+    }
+
+    private List<String[]> readSweepRows() throws IOException {
+        Path csvPath = paths.reportFilePath("sweep.csv");
+        List<String[]> rows = new ArrayList<>();
+        try (CSVReader reader = new CSVReader(Files.newBufferedReader(csvPath))) {
+            for (String[] row : reader) {
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    private List<BenchmarkResult> blockResults(int runNumber) {
+        return Arrays.asList(
+                sweepResult(String.format("run-%03d-thread-00", runNumber), 100.0),
+                sweepResult(String.format("run-%03d-thread-01", runNumber), 200.0));
+    }
+
+    private BenchmarkResult sweepResult(String runId, double throughputMBps) {
+        Duration elapsed = Duration.ofMillis(1000);
+        return new BenchmarkResult(runId, "SEQ_READ", 1024L * 1024 * 1024,
+                elapsed, elapsed.toNanos(), throughputMBps, 10.0, 10.0 * 1_000_000.0,
+                1000.0, Instant.now(), 500.0, 2000.0, 5000.0, 10000.0, 50000L);
+    }
+
+    private static void assertMissingBlockRow(String[] row, String blockSize) {
+        assertThat(row).hasSize(9);
+        assertThat(row[0]).isEqualTo(blockSize);
+        for (int i = 1; i < row.length; i++) {
+            assertThat(row[i]).isEqualTo("N/A");
+        }
     }
 
     // ==================== Diff Report Tests ====================

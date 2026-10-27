@@ -12,6 +12,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousFileChannel;
 import java.nio.channels.CompletionHandler;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
@@ -59,6 +60,12 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
   /** Multiplier used to derive an independent, deterministic seed per worker thread. */
   private static final long THREAD_SEED_MIX = 0x9E3779B97F4A7C15L;
 
+  /** Number of attempts made to remove a session directory while files may still be closing. */
+  private static final int CLEANUP_ATTEMPTS = 3;
+
+  /** Delay between cleanup attempts while worker threads release their file handles. */
+  private static final long CLEANUP_RETRY_MILLIS = 200L;
+
   /** Opens the asynchronous channel used for ASYNC mode; replaceable in tests. */
   @FunctionalInterface
   interface AsyncChannelFactory {
@@ -87,6 +94,16 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
 
   private final Semaphore queueSemaphore;
   private final SystemInfoSnapshot systemInfo;
+
+  /** Set by the shutdown hook so worker loops stop submitting new blocks. */
+  private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
+
+  /** Guards hook lifecycle and makes graceful versus shutdown cleanup exactly-once. */
+  private final Object cleanupLock = new Object();
+
+  private volatile Thread shutdownHook;
+  private boolean sessionCleanupDone;
+  private boolean sessionCleanupInProgress;
 
   private final AtomicLong progressBytesProcessed = new AtomicLong(0);
   private final Instant progressStartTime = Instant.now();
@@ -213,6 +230,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
 
   @Override
   public List<BenchmarkResult> runAll() throws IOException, InterruptedException {
+    registerShutdownHook();
     try {
       paths.ensureTestDirectory();
       long totalSpaceNeeded = config.getFileSizeBytes() * config.getThreads();
@@ -261,8 +279,11 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
     } finally {
       stopProgressReporting();
       shutdownExecutors();
+      // Remove the hook first so graceful completion cannot race a second cleanup. If the JVM is
+      // already shutting down, removal throws and the hook becomes the single cleanup owner.
+      unregisterShutdownHook();
       if (!config.isRetainTestFiles()) {
-        paths.cleanupSessionFiles(false);
+        cleanupSessionFilesOnce();
       }
     }
   }
@@ -395,7 +416,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
       }
 
       if (isMixed) {
-        while (bytesProcessed < fileSize) {
+        while (bytesProcessed < fileSize && !shutdownRequested.get()) {
           int bytesToProcess = (int) Math.min(blockSize, fileSize - bytesProcessed);
 
           queueSemaphore.acquireUninterruptibly();
@@ -443,7 +464,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
         if (isReadOnly) {
           channel.truncate(fileSize);
           long prefillWritten = 0;
-          while (prefillWritten < fileSize) {
+          while (prefillWritten < fileSize && !shutdownRequested.get()) {
             int toWrite = (int) Math.min(blockSize, fileSize - prefillWritten);
             byte[] temp = new byte[toWrite];
             rng.nextBytes(temp);
@@ -456,7 +477,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
           start = Instant.now();
         }
 
-        while (bytesProcessed < fileSize) {
+        while (bytesProcessed < fileSize && !shutdownRequested.get()) {
           int bytesToProcess = (int) Math.min(blockSize, fileSize - bytesProcessed);
 
           queueSemaphore.acquireUninterruptibly();
@@ -555,7 +576,7 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
 
       long offset = 0;
       while (offset < fileSize) {
-        if (failure.get() != null) {
+        if (shutdownRequested.get() || failure.get() != null) {
           break;
         }
 
@@ -938,6 +959,161 @@ public final class BenchmarkRunner implements IBenchmarkRunner {
   @Override
   public List<MetricsSnapshot> getMetricsLog() {
     return metricsCollector.getMetricsLog();
+  }
+
+  /**
+   * Registers a JVM shutdown hook that reclaims this session's payload on SIGINT/SIGTERM.
+   *
+   * <p>Package-private so tests can exercise lifecycle transitions without starting a full
+   * benchmark. Registration is idempotent and tolerant of a JVM that is already shutting down.
+   */
+  void registerShutdownHook() {
+    synchronized (cleanupLock) {
+      if (shutdownHook != null) {
+        return;
+      }
+      Thread hook =
+          new Thread(this::handleJvmShutdown, "jstoragemark-shutdown-" + config.getSessionId());
+      hook.setDaemon(false);
+      try {
+        Runtime.getRuntime().addShutdownHook(hook);
+        shutdownHook = hook;
+        logger.debug("Registered JVM shutdown hook for session {}", config.getSessionId());
+      } catch (IllegalStateException | SecurityException e) {
+        logger.warn(
+            "Could not register JVM shutdown hook; interrupted runs may leave session files behind",
+            e);
+      }
+    }
+  }
+
+  /**
+   * Removes the shutdown hook after a graceful run.
+   *
+   * <p>When the JVM is already shutting down removal is impossible; the hook then owns cleanup and
+   * {@link #cleanupSessionFilesOnce()} still guarantees a single deletion pass.
+   */
+  void unregisterShutdownHook() {
+    Thread hook;
+    synchronized (cleanupLock) {
+      hook = shutdownHook;
+      shutdownHook = null;
+    }
+    if (hook == null) {
+      return;
+    }
+    try {
+      Runtime.getRuntime().removeShutdownHook(hook);
+      logger.debug("Removed JVM shutdown hook for session {}", config.getSessionId());
+    } catch (IllegalStateException e) {
+      logger.debug("JVM shutdown already in progress; shutdown hook will reclaim session files");
+    } catch (SecurityException e) {
+      logger.warn("Not permitted to remove JVM shutdown hook", e);
+    }
+  }
+
+  /**
+   * Returns whether a shutdown hook is currently registered (used by lifecycle tests).
+   *
+   * @return true when this runner owns a registered hook
+   */
+  boolean isShutdownHookRegistered() {
+    synchronized (cleanupLock) {
+      return shutdownHook != null;
+    }
+  }
+
+  /**
+   * Shutdown-hook body: stop accepting new I/O, let workers release file handles, then delete the
+   * session tree when the user did not ask to retain it.
+   */
+  void handleJvmShutdown() {
+    if (config.isRetainTestFiles()) {
+      logger.info(
+          "JVM shutdown detected; retaining session files in {}", paths.getSessionDir());
+      return;
+    }
+    logger.warn(
+        "JVM shutdown detected; reclaiming session files in {}", paths.getSessionDir());
+    shutdownRequested.set(true);
+    abortExecutorsForShutdown();
+    cleanupSessionFilesOnce();
+  }
+
+  /**
+   * Stops workers quickly during JVM shutdown.
+   *
+   * <p>Unlike {@link #shutdownExecutors()}, this path favors speed over a long graceful drain
+   * because the process is already terminating.
+   */
+  private void abortExecutorsForShutdown() {
+    metricsCollector.stop();
+    ioExecutor.shutdownNow();
+    try {
+      if (!ioExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+        logger.warn("Worker threads still running during shutdown; cleanup will retry");
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  /**
+   * Deletes the session payload exactly once, retrying briefly for files that are still closing.
+   *
+   * <p>Retries matter on Windows, where an open handle prevents deletion until the worker thread
+   * has fully unwound. Reports live outside the session directory and are never removed here.
+   */
+  private void cleanupSessionFilesOnce() {
+    synchronized (cleanupLock) {
+      if (sessionCleanupDone) {
+        return;
+      }
+      // If another thread (graceful completion or the hook) already owns cleanup, wait for it.
+      // Object.wait releases the lock, so no sleeping happens while holding it.
+      while (sessionCleanupInProgress) {
+        try {
+          cleanupLock.wait(TimeUnit.SECONDS.toMillis(1));
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+        if (sessionCleanupDone) {
+          return;
+        }
+      }
+      if (sessionCleanupDone) {
+        return;
+      }
+      sessionCleanupInProgress = true;
+    }
+
+    try {
+      for (int attempt = 0; attempt < CLEANUP_ATTEMPTS; attempt++) {
+        paths.cleanupSessionFiles(false);
+        if (Files.notExists(paths.getSessionDir())) {
+          break;
+        }
+        if (attempt + 1 < CLEANUP_ATTEMPTS) {
+          try {
+            Thread.sleep(CLEANUP_RETRY_MILLIS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            break;
+          }
+        }
+      }
+      if (Files.exists(paths.getSessionDir())) {
+        logger.warn(
+            "Session directory still present after cleanup attempts: {}", paths.getSessionDir());
+      }
+    } finally {
+      synchronized (cleanupLock) {
+        sessionCleanupDone = true;
+        sessionCleanupInProgress = false;
+        cleanupLock.notifyAll();
+      }
+    }
   }
 
   private void shutdownExecutors() {

@@ -25,8 +25,9 @@ class BenchmarkPathsTest {
     private BenchmarkPaths benchmarkPaths;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws IOException {
         benchmarkPaths = new BenchmarkPaths(tempDir, SESSION_ID);
+        benchmarkPaths.ensureTestDirectory();
     }
 
     @AfterEach
@@ -46,6 +47,8 @@ class BenchmarkPathsTest {
         paths.ensureTestDirectory();
 
         assertThat(newDir).exists().isDirectory();
+        assertThat(paths.getSessionDir()).exists().isDirectory();
+        assertThat(paths.getSessionDir().getParent()).isEqualTo(newDir);
     }
 
     @Test
@@ -208,16 +211,18 @@ class BenchmarkPathsTest {
     // ==================== Cleanup Tests ====================
 
     @Test
-    @DisplayName("Cleanup session files should delete files with session id")
+    @DisplayName("Cleanup session files should delete the isolated session directory")
     void cleanupShouldDeleteSessionFiles() throws IOException {
         Path testFile = benchmarkPaths.testFilePath(1, "test");
         Files.writeString(testFile, "test data");
 
         assertThat(testFile).exists();
+        assertThat(benchmarkPaths.getSessionDir()).exists();
 
         benchmarkPaths.cleanupSessionFiles(false);
 
         assertThat(testFile).doesNotExist();
+        assertThat(benchmarkPaths.getSessionDir()).doesNotExist();
     }
 
     @Test
@@ -232,14 +237,66 @@ class BenchmarkPathsTest {
     }
 
     @Test
-    @DisplayName("Cleanup session files should delete run files")
-    void cleanupShouldDeleteRunFiles() throws IOException {
+    @DisplayName("Cleanup should not delete run-named files outside the session directory")
+    void cleanupShouldNotDeleteLooseRunFiles() throws IOException {
         Path runFile = tempDir.resolve("run-001.test.bin");
-        Files.writeString(runFile, "test data");
+        Files.writeString(runFile, "user data that only looks like a benchmark file");
 
         benchmarkPaths.cleanupSessionFiles(false);
 
-        assertThat(runFile).doesNotExist();
+        assertThat(runFile).exists();
+    }
+
+    @Test
+    @DisplayName("Cleanup should delete only the current session tree and nothing in parent or siblings")
+    void cleanupShouldDeleteOnlySessionTree() throws IOException {
+        Path parentFile = tempDir.resolve("user-notes.txt");
+        Path siblingDir = tempDir.resolve("session-other-session");
+        Path siblingFile = siblingDir.resolve("run-001.data.other-session.bin");
+        Path nestedSessionFile = benchmarkPaths.getSessionDir()
+                .resolve("nested")
+                .resolve("run-002.data.test-session-123.bin");
+
+        Files.writeString(parentFile, "keep parent");
+        Files.createDirectories(siblingDir);
+        Files.writeString(siblingFile, "keep sibling");
+        Files.createDirectories(nestedSessionFile.getParent());
+        Files.writeString(nestedSessionFile, "delete nested");
+        Files.writeString(benchmarkPaths.testFilePath(1, "seq"), "delete root session file");
+
+        benchmarkPaths.cleanupSessionFiles(false);
+
+        assertThat(benchmarkPaths.getSessionDir()).doesNotExist();
+        assertThat(parentFile).exists();
+        assertThat(siblingDir).exists();
+        assertThat(siblingFile).exists();
+        assertThat(tempDir).exists();
+    }
+
+    @Test
+    @DisplayName("Session ids cannot escape the configured base directory")
+    void sessionIdShouldNotEscapeBaseDirectory() {
+        BenchmarkPaths malicious = new BenchmarkPaths(tempDir, "../../outside");
+
+        Path sessionDir = malicious.getSessionDir().toAbsolutePath().normalize();
+
+        assertThat(sessionDir.startsWith(tempDir.toAbsolutePath().normalize())).isTrue();
+        assertThat(sessionDir.getParent()).isEqualTo(tempDir.toAbsolutePath().normalize());
+        assertThat(sessionDir.getFileName().toString()).doesNotContain("/").doesNotContain("\\");
+    }
+
+    @Test
+    @DisplayName("Test payload paths are rooted at the session directory")
+    void payloadPathsShouldBeInsideSessionDirectory() {
+        assertThat(benchmarkPaths.testFilePath(1, "seq").getParent())
+                .isEqualTo(benchmarkPaths.getSessionDir());
+        assertThat(benchmarkPaths.testFilePath(1, "seq", 0).getParent())
+                .isEqualTo(benchmarkPaths.getSessionDir());
+        assertThat(benchmarkPaths.tempFilePath(1, "seq").getParent())
+                .isEqualTo(benchmarkPaths.getSessionDir());
+        assertThat(benchmarkPaths.reportFilePath("json").getParent())
+                .as("reports stay outside the disposable payload")
+                .isEqualTo(tempDir);
     }
 
     @Test
@@ -284,6 +341,7 @@ class BenchmarkPathsTest {
     @DisplayName("Getters should return correct values")
     void gettersShouldReturnCorrectValues() {
         assertThat(benchmarkPaths.getBaseDir()).isEqualTo(tempDir);
+        assertThat(benchmarkPaths.getSessionDir()).isEqualTo(tempDir.resolve("session-" + SESSION_ID));
         assertThat(benchmarkPaths.getSessionId()).isEqualTo(SESSION_ID);
     }
 
